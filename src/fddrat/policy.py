@@ -33,12 +33,12 @@ class DummyARModel(nn.Module):
         super().__init__()
         self.d_model = d_model
         self.vocab_size = vocab_size
+        self.blocks = nn.ModuleList([nn.Linear(d_model, d_model)])
+        self.head = nn.Linear(d_model, vocab_size)
     def forward(self, x):
         B, L, _ = x.size()
-        logits = torch.randn(B, L, self.vocab_size, device=x.device)
         hidden = torch.randn(B, L, self.d_model, device=x.device)
-        # Mock q_t, k_prev mappings
-        return logits, hidden, hidden
+        return self.head(self.blocks[-1](hidden))
 
 class FDDRATPolicy(BasePolicy):
     def __init__(self, cfg: FDDRATConfig):
@@ -53,6 +53,16 @@ class FDDRATPolicy(BasePolicy):
         self.router = ShadowRouter(D_v=cfg.D_v)
         self.loss_fn = FDDRATLoss(lambda_ratio=cfg.lambda_ratio, beta_mse=cfg.beta_mse)
         self.dropout = MaskedNestedDropout()
+        
+        # Hook for capturing hidden states
+        self._hooked_hidden = None
+        def hook_fn(module, inp, out):
+            self._hooked_hidden = out
+            
+        if hasattr(self.ar_model, 'blocks'):
+            self.ar_model.blocks[-1].register_forward_hook(hook_fn)
+        else:
+            self.ar_model.register_forward_hook(hook_fn)
         
     def forward(self, batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         """
@@ -71,15 +81,35 @@ class FDDRATPolicy(BasePolicy):
         K_sampled = torch.randint(1, self.cfg.H_l + 1, (B,), device=z_v.device)
         latents_masked = self.dropout(latents, K_sampled)
         
+        # 3.5. BOS padding for AR models
+        bos_emb = torch.zeros(B, 1, latents_masked.size(-1), device=latents_masked.device)
+        latents_ar = torch.cat([bos_emb, latents_masked], dim=1) # [B, H_l+1, D_lat]
+        
         # 4. AR Model Forward
-        logits, q_t, k_prev = self.ar_model(latents_masked)
+        self._hooked_hidden = None
+        logits = self.ar_model(latents_ar) # [B, H_l+1, Vocab]
         
-        # 5. Router Stop Probabilities
-        p_stop = self.router(q_t, k_prev, z_v)
+        # Retrieve mapped hidden
+        if self._hooked_hidden is None:
+            self._hooked_hidden = torch.randn(B, self.cfg.H_l + 1, self.cfg.D_v, device=z_v.device)
+            
+        hidden_states = self._hooked_hidden
         
-        # 6. CRH Integration & Gradient Isolation
-        a_coarse = self.action_tokenizer.decode_coarse(latents_masked)
-        a_coarse_detached = a_coarse.detach()
+        # 5. Decoupled Routing Slicing
+        q_t = hidden_states[:, 1:, :] # [B, H_l, D]
+        k_prev = hidden_states[:, :-1, :] # [B, H_l, D]
+        
+        p_stop_logits = self.router(q_t, k_prev, z_v)
+        
+        # 6. CRH Integration & Denormalization
+        a_coarse_norm = self.action_tokenizer.decode_coarse(latents_masked)
+        
+        if hasattr(self.action_tokenizer, 'normalizer') and 'action' in self.action_tokenizer.normalizer:
+            a_coarse_denorm = self.action_tokenizer.normalizer['action'].unnormalize(a_coarse_norm)
+        else:
+            a_coarse_denorm = a_coarse_norm
+
+        a_coarse_detached = a_coarse_denorm.detach()
         
         delta_a = self.crh(a_coarse_detached, z_v)
         residual_target = batch['action'] - a_coarse_detached
@@ -90,7 +120,7 @@ class FDDRATPolicy(BasePolicy):
         loss = self.loss_fn(
             logits=logits,
             targets=targets,
-            p_stop=p_stop,
+            p_stop_logits=p_stop_logits,
             tau_target=tau_target,
             delta_a=delta_a,
             residual_target=residual_target,

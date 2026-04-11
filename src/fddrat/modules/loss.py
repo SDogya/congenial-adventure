@@ -12,7 +12,7 @@ class FDDRATLoss(nn.Module):
         self, 
         logits: torch.Tensor, 
         targets: torch.Tensor, 
-        p_stop: torch.Tensor, 
+        p_stop_logits: torch.Tensor, 
         tau_target: torch.Tensor, 
         delta_a: torch.Tensor, 
         residual_target: torch.Tensor, 
@@ -20,14 +20,16 @@ class FDDRATLoss(nn.Module):
         H_l: int
     ) -> torch.Tensor:
         # Cross Entropy Loss
-        B = logits.size(0)
-        logits_flat = logits.view(-1, logits.size(-1))
-        targets_flat = targets.view(-1)
+        # Shift logits to match original target boundaries and prevent looking ahead
+        logits_shifted = logits[:, :-1, :]
+        
+        logits_flat = logits_shifted.reshape(-1, logits_shifted.size(-1))
+        targets_flat = targets.reshape(-1)
         
         loss_ce = F.cross_entropy(logits_flat, targets_flat, ignore_index=-1)
         
         # Ratio Loss
-        loss_ratio = F.binary_cross_entropy_with_logits(p_stop.view(-1), tau_target.view(-1).float())
+        loss_ratio = F.binary_cross_entropy_with_logits(p_stop_logits.view(-1), tau_target.view(-1).float())
         
         # MSE Loss with strict masking for sequence end boundary rules
         mse_loss_raw = F.mse_loss(delta_a, residual_target, reduction='none') # [B, H_a, D_a]
@@ -38,7 +40,8 @@ class FDDRATLoss(nn.Module):
         # Masking: do not penalize if K_sampled >= H_l
         mask = (K_sampled < H_l).float()
         
-        masked_mse = (mse_loss_item * mask).mean()
+        # Strict summation division to prevent gradient decay (posterior collapse)
+        masked_mse = (mse_loss_item * mask).sum() / (mask.sum() + 1e-8)
         
         loss_total = loss_ce + self.lambda_ratio * loss_ratio + self.beta_mse * masked_mse
         
