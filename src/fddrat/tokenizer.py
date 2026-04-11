@@ -17,11 +17,11 @@ class DummyDecoder(nn.Module):
         self.latent_horizon = 64
     def forward(self, x, **kwargs): return x
 
-class DummyNormalizerField:
+class DummyNormalizerField(nn.Module):
     def normalize(self, x): return x
     def unnormalize(self, x): return x
 
-class DummyNormalizer(dict):
+class DummyNormalizer(nn.ModuleDict):
     def __init__(self):
         super().__init__()
         self['action'] = DummyNormalizerField()
