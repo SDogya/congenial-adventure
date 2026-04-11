@@ -29,14 +29,14 @@ class FDDRATPolicy(BasePolicy):
         
         # Vocab size logic parsed from quantizer
         if hasattr(self.action_tokenizer, 'quantizer'):
-            vocab_size = self.action_tokenizer.quantizer.codebook_size + 1 # Account for BOS
-            embedding_dim = self.action_tokenizer.quantizer.embedding_dim
+            self.vocab_size = self.action_tokenizer.quantizer.codebook_size + 1 # Account for BOS
+            self.embedding_dim = self.action_tokenizer.quantizer.embedding_dim
         else:
-            vocab_size = 1025 # Safe fallback if quantizer mock fails structurally
-            embedding_dim = 256
+            self.vocab_size = 1025 # Safe fallback if quantizer mock fails structurally
+            self.embedding_dim = 256
             
         self.ar_model = AutoregressiveModel(
-            vocab_size=vocab_size,
+            vocab_size=self.vocab_size,
             max_seq_len=cfg.H_l + 1,
             max_cond_len=1,
             cond_dim=cfg.D_v,
@@ -46,7 +46,7 @@ class FDDRATPolicy(BasePolicy):
         self.crh = ContinuousResidualHead(H_a=cfg.H_a, D_a=cfg.D_a, D_v=cfg.D_v)
         self.router = ShadowRouter(D_v=cfg.D_v)
         self.loss_fn = FDDRATLoss(lambda_ratio=cfg.lambda_ratio, beta_mse=cfg.beta_mse)
-        self.dropout = MaskedNestedDropout(dim=embedding_dim)
+        self.dropout = MaskedNestedDropout(dim=self.embedding_dim)
         
         # Keep register_forward_hook mechanism
         self._hooked_hidden = None
@@ -81,7 +81,7 @@ class FDDRATPolicy(BasePolicy):
         tokens_masked = tokens[..., 0].clone() # [B, H_l]
         
         # Create BOS token tensor 
-        bos_id = getattr(self.action_tokenizer, 'bos_id', vocab_size - 1)
+        bos_id = getattr(self.action_tokenizer, 'bos_id', self.vocab_size - 1)
         bos_tokens = torch.full((B, 1), bos_id, device=tokens_masked.device, dtype=torch.long)
         tokens_ar = torch.cat([bos_tokens, tokens_masked], dim=1) # [B, H_l+1]
         
@@ -117,7 +117,7 @@ class FDDRATPolicy(BasePolicy):
         delta_a = self.crh(a_coarse_detached, z_v)
         residual_target = batch['action'] - a_coarse_detached
         
-        targets = tokens[..., 0] if len(tokens.size()) > 2 else tokens
+        targets = tokens_masked
         tau_target = torch.rand_like(p_stop_logits)
         
         loss = self.loss_fn(
@@ -154,17 +154,12 @@ class FDDRATPolicy(BasePolicy):
             B = obs.size(0)
             z_v = self.obs_encoder(obs)
             
-            # Start with BOS
-            if hasattr(self.action_tokenizer, 'quantizer'):
-                embedding_dim = self.action_tokenizer.quantizer.embedding_dim
-            else:
-                embedding_dim = 256
-                
-            bos_id = getattr(self.action_tokenizer, 'bos_id', vocab_size - 1)
+            # Start with BOS 
+            bos_id = getattr(self.action_tokenizer, 'bos_id', self.vocab_size - 1)
             tokens_in = torch.full((B, 1), bos_id, device=obs.device, dtype=torch.long)
             
             # Latents sequence for evaluation track
-            latents = torch.zeros(B, 1, embedding_dim, device=obs.device)
+            latents = torch.zeros(B, 1, self.embedding_dim, device=obs.device)
             if hasattr(self.action_tokenizer, 'bos_id_emb'):
                  latents = self.action_tokenizer.bos_id_emb.expand(B, 1, -1)
             
@@ -187,7 +182,7 @@ class FDDRATPolicy(BasePolicy):
                 if hasattr(self.action_tokenizer, 'quantizer'):
                     next_latent = self.action_tokenizer.quantizer.indices_to_embedding(next_token.unsqueeze(-1))
                 else:
-                    next_latent = torch.zeros(B, 1, embedding_dim, device=obs.device)
+                    next_latent = torch.zeros(B, 1, self.embedding_dim, device=obs.device)
                     
                 latents = torch.cat([latents, next_latent], dim=1)
                 
@@ -216,7 +211,7 @@ class FDDRATPolicy(BasePolicy):
                  if hasattr(self.action_tokenizer, 'quantizer'):
                      padded_latents = self.action_tokenizer.quantizer.indices_to_embedding(pad_tokens.unsqueeze(-1))
                  else:
-                     padded_latents = torch.zeros(B, pad_size, embedding_dim, device=obs.device)
+                     padded_latents = torch.zeros(B, pad_size, self.embedding_dim, device=obs.device)
                  latents = torch.cat([latents, padded_latents], dim=1)
             
             # Strip BOS to extract true token span
@@ -234,5 +229,9 @@ class FDDRATPolicy(BasePolicy):
             # 3. CRH refinement step
             delta_a = self.crh(a_coarse, z_v)
             
-            # Native Add
-            return a_coarse + delta_a
+            # Action Output Contract Match
+            a_final = a_coarse + delta_a
+            
+            # Safe slice fallback to H_a if n_action_steps missing
+            n_slice = getattr(self.cfg, 'n_action_steps', getattr(self.cfg, 'H_a', 16))
+            return {"action": a_final[:, :n_slice]}
