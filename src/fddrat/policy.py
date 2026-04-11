@@ -115,7 +115,7 @@ class FDDRATPolicy(BasePolicy):
         residual_target = batch['action'] - a_coarse_detached
         
         targets = tokens[..., 0] 
-        tau_target = torch.rand_like(p_stop)
+        tau_target = torch.rand_like(p_stop_logits)
         
         loss = self.loss_fn(
             logits=logits,
