@@ -1,10 +1,8 @@
 import torch
 
-try:
-    from oat.tokenizer.oat.tokenizer import OATTok
-except ImportError:
-    class OATTok:
-        pass
+
+from oat.tokenizer.oat.tokenizer import OATTok
+
 
 class FDDRATTok(OATTok):
     """
