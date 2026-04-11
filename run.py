@@ -1,4 +1,8 @@
 import os
+import sys
+sys.path.insert(0, os.path.abspath('oat'))
+sys.path.insert(0, os.path.abspath('hnet'))
+
 import hydra
 from hydra.core.config_store import ConfigStore
 import pytorch_lightning as pl

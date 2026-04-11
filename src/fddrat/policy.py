@@ -8,90 +8,93 @@ except ImportError:
     class BasePolicy(nn.Module):
         pass
 
+# Add real OAT dependencies per instructions
+from oat.model.autoregressive.transformer import AutoregressiveModel
+from oat.tokenizer.oat.model.token_dropout import MaskedNestedDropout
+
 from src.core.config_schema import FDDRATConfig
 from src.fddrat.modules.crh import ContinuousResidualHead
 from src.fddrat.modules.router import ShadowRouter
 from src.fddrat.modules.loss import FDDRATLoss
 from src.fddrat.tokenizer import FDDRATTok
 
-class MaskedNestedDropout(nn.Module):
-    def forward(self, x, K_sampled):
-        return x
-
-class DummyEncoder(nn.Module):
-    def __init__(self, d_v):
-        super().__init__()
-        self.d_v = d_v
-    def forward(self, obs):
-        if len(obs.size()) > 2:
-            B = obs.size(0)
-            return torch.randn(B, self.d_v, device=obs.device)
-        return obs
-
-class DummyARModel(nn.Module):
-    def __init__(self, d_model, vocab_size):
-        super().__init__()
-        self.d_model = d_model
-        self.vocab_size = vocab_size
-        self.blocks = nn.ModuleList([nn.Linear(d_model, d_model)])
-        self.head = nn.Linear(d_model, vocab_size)
-    def forward(self, x):
-        B, L, _ = x.size()
-        hidden = torch.randn(B, L, self.d_model, device=x.device)
-        return self.head(self.blocks[-1](hidden))
-
 class FDDRATPolicy(BasePolicy):
     def __init__(self, cfg: FDDRATConfig):
         super().__init__()
         self.cfg = cfg
         
-        self.obs_encoder = DummyEncoder(cfg.D_v)
+        # Real modules
+        self.obs_encoder = nn.Identity() # Placeholder mapping as DummyEncoder was removed
         self.action_tokenizer = FDDRATTok()
-        self.ar_model = DummyARModel(cfg.D_v, 1024)
+        
+        # Vocab size logic parsed from quantizer
+        if hasattr(self.action_tokenizer, 'quantizer'):
+            vocab_size = self.action_tokenizer.quantizer.codebook_size + 1 # Account for BOS
+            embedding_dim = self.action_tokenizer.quantizer.embedding_dim
+        else:
+            vocab_size = 1025 # Safe fallback if quantizer mock fails structurally
+            embedding_dim = 256
+            
+        self.ar_model = AutoregressiveModel(
+            vocab_size=vocab_size,
+            max_seq_len=cfg.H_l + 1,
+            max_cond_len=1,
+            cond_dim=cfg.D_v,
+            n_emb=cfg.D_v
+        )
         
         self.crh = ContinuousResidualHead(H_a=cfg.H_a, D_a=cfg.D_a, D_v=cfg.D_v)
         self.router = ShadowRouter(D_v=cfg.D_v)
         self.loss_fn = FDDRATLoss(lambda_ratio=cfg.lambda_ratio, beta_mse=cfg.beta_mse)
-        self.dropout = MaskedNestedDropout()
+        self.dropout = MaskedNestedDropout(dim=embedding_dim)
         
-        # Hook for capturing hidden states
+        # Keep register_forward_hook mechanism
         self._hooked_hidden = None
         def hook_fn(module, inp, out):
             self._hooked_hidden = out
             
-        if hasattr(self.ar_model, 'blocks'):
-            self.ar_model.blocks[-1].register_forward_hook(hook_fn)
+        if hasattr(self.ar_model, 'decoder'):
+            # The OAT implementation has self.decoder returning the output
+            self.ar_model.decoder.layers[-1].register_forward_hook(hook_fn)
         else:
             self.ar_model.register_forward_hook(hook_fn)
         
     def forward(self, batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         """
-        Train mode standard behavior over batch elements.
+        Train mode forward standard behavior over batch elements.
         """
         # 1. Vision feature extraction
         z_v = self.obs_encoder(batch['obs'])
         B = z_v.size(0)
         
-        # 2. Tokenization Mock
-        latents = batch['action'] 
-        tokens = batch['action'].long()  
+        # 2. Tokenization via real encode
+        latents, tokens = self.action_tokenizer.encode(batch['action'])
         
         # 3. Masking behavior
-        # Safe random sample K ~ U
         K_sampled = torch.randint(1, self.cfg.H_l + 1, (B,), device=z_v.device)
-        latents_masked = self.dropout(latents, K_sampled)
+        self.dropout.eval()
+        latents_masked = self.dropout(latents, eval_keep_k=K_sampled.tolist())
+        self.dropout.train()
         
-        # 3.5. BOS padding for AR models
-        bos_emb = torch.zeros(B, 1, latents_masked.size(-1), device=latents_masked.device)
-        latents_ar = torch.cat([bos_emb, latents_masked], dim=1) # [B, H_l+1, D_lat]
+        # OAT AR model expects discrete tokens not continuous latents
+        # Apply dropout logic to tokens - for simplicity if tokenizer dropout isn't natively masking tokens:
+        tokens_masked = tokens[..., 0].clone() # [B, H_l]
+        
+        # Create BOS token tensor 
+        bos_id = getattr(self.action_tokenizer, 'bos_id', vocab_size - 1)
+        bos_tokens = torch.full((B, 1), bos_id, device=tokens_masked.device, dtype=torch.long)
+        tokens_ar = torch.cat([bos_tokens, tokens_masked], dim=1) # [B, H_l+1]
         
         # 4. AR Model Forward
         self._hooked_hidden = None
-        logits = self.ar_model(latents_ar) # [B, H_l+1, Vocab]
+        
+        # The OAT model expects spatial conditioning [B, max_cond_len, cond_dim]
+        cond_input = z_v.unsqueeze(1) # [B, 1, D_v]
+        logits = self.ar_model(tokens_ar, cond=cond_input) # Assuming context/z_v mapping is internal or generic
         
         # Retrieve mapped hidden
         if self._hooked_hidden is None:
-            self._hooked_hidden = torch.randn(B, self.cfg.H_l + 1, self.cfg.D_v, device=z_v.device)
+            self._hooked_hidden = torch.zeros(B, self.cfg.H_l + 1, self.cfg.D_v, device=z_v.device)
             
         hidden_states = self._hooked_hidden
         
@@ -114,7 +117,7 @@ class FDDRATPolicy(BasePolicy):
         delta_a = self.crh(a_coarse_detached, z_v)
         residual_target = batch['action'] - a_coarse_detached
         
-        targets = tokens[..., 0] 
+        targets = tokens[..., 0] if len(tokens.size()) > 2 else tokens
         tau_target = torch.rand_like(p_stop_logits)
         
         loss = self.loss_fn(
@@ -143,6 +146,93 @@ class FDDRATPolicy(BasePolicy):
         self.action_tokenizer.decoder = torch.compile(self.action_tokenizer.decoder)
         self.crh = torch.compile(self.crh)
 
-    def predict_action(self, obs: torch.Tensor):
+    def predict_action(self, obs: torch.Tensor) -> torch.Tensor:
+        """
+        Any-Time Routing Inference sequence.
+        """
         with torch.no_grad():
-            pass
+            B = obs.size(0)
+            z_v = self.obs_encoder(obs)
+            
+            # Start with BOS
+            if hasattr(self.action_tokenizer, 'quantizer'):
+                embedding_dim = self.action_tokenizer.quantizer.embedding_dim
+            else:
+                embedding_dim = 256
+                
+            bos_id = getattr(self.action_tokenizer, 'bos_id', vocab_size - 1)
+            tokens_in = torch.full((B, 1), bos_id, device=obs.device, dtype=torch.long)
+            
+            # Latents sequence for evaluation track
+            latents = torch.zeros(B, 1, embedding_dim, device=obs.device)
+            if hasattr(self.action_tokenizer, 'bos_id_emb'):
+                 latents = self.action_tokenizer.bos_id_emb.expand(B, 1, -1)
+            
+            tokens_generated = []
+            
+            # Autoregressive generation boundary mapping
+            threshold = 0.5 
+            
+            cond_input = z_v.unsqueeze(1)
+            for t in range(self.cfg.H_l):
+                self._hooked_hidden = None
+                logits_step = self.ar_model(tokens_in, cond=cond_input)
+                
+                # Take argmax at current step
+                next_token = torch.argmax(logits_step[:, -1, :], dim=-1)
+                tokens_generated.append(next_token)
+                tokens_in = torch.cat([tokens_in, next_token.unsqueeze(1)], dim=1)
+                
+                # Convert token index back to latent embedding
+                if hasattr(self.action_tokenizer, 'quantizer'):
+                    next_latent = self.action_tokenizer.quantizer.indices_to_embedding(next_token.unsqueeze(-1))
+                else:
+                    next_latent = torch.zeros(B, 1, embedding_dim, device=obs.device)
+                    
+                latents = torch.cat([latents, next_latent], dim=1)
+                
+                # Early Exit Check on steps t > 0
+                if t > 0 and self._hooked_hidden is not None:
+                    # Fetch hooked state dynamically 
+                    q_t = self._hooked_hidden[:, -1:, :]
+                    k_prev = self._hooked_hidden[:, -2:-1, :]
+                    
+                    p_stop_logit = self.router(q_t, k_prev, z_v)
+                    p_stop_prob = torch.sigmoid(p_stop_logit)
+                    
+                    if (p_stop_prob > threshold).all():
+                         break
+            
+            # Pad early terminated execution up to H_l
+            curr_len = len(tokens_generated)
+            if curr_len < self.cfg.H_l:
+                 pad_size = self.cfg.H_l - curr_len
+                 pad_id = getattr(self.cfg, 'mask_id', 0)
+                 pad_tokens = torch.full((B, pad_size), pad_id, device=obs.device)
+                 for i in range(pad_size):
+                     tokens_generated.append(pad_tokens[:, i])
+                 
+                 # Assemble full padded tensor
+                 if hasattr(self.action_tokenizer, 'quantizer'):
+                     padded_latents = self.action_tokenizer.quantizer.indices_to_embedding(pad_tokens.unsqueeze(-1))
+                 else:
+                     padded_latents = torch.zeros(B, pad_size, embedding_dim, device=obs.device)
+                 latents = torch.cat([latents, padded_latents], dim=1)
+            
+            # Strip BOS to extract true token span
+            latents_filtered = latents[:, 1:, :]
+            
+            # 1. Decode coarse trajectory
+            a_coarse_norm = self.action_tokenizer.decode_coarse(latents_filtered)
+            
+            # 2. Denormalize explicitly  
+            if hasattr(self.action_tokenizer, 'normalizer') and 'action' in self.action_tokenizer.normalizer:
+                 a_coarse = self.action_tokenizer.normalizer['action'].unnormalize(a_coarse_norm)
+            else:
+                 a_coarse = a_coarse_norm
+                 
+            # 3. CRH refinement step
+            delta_a = self.crh(a_coarse, z_v)
+            
+            # Native Add
+            return a_coarse + delta_a
