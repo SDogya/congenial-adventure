@@ -17,6 +17,15 @@ class DummyDecoder(nn.Module):
         self.latent_horizon = 64
     def forward(self, x, **kwargs): return x
 
+class DummyNormalizerField:
+    def normalize(self, x): return x
+    def unnormalize(self, x): return x
+
+class DummyNormalizer(dict):
+    def __init__(self):
+        super().__init__()
+        self['action'] = DummyNormalizerField()
+
 class FDDRATTok(OATTok):
     """
     Tokenizer tailored for FD-DRAT architecture, providing isolated access
@@ -24,11 +33,16 @@ class FDDRATTok(OATTok):
     """
     def __init__(self, *args, **kwargs):
         # Auto-inject mock components for dry-run testing (e.g. Kaggle pipeline test)
+        is_mocked = False
         if len(args) == 0 and not kwargs:
             kwargs['encoder'] = nn.Identity()
             kwargs['decoder'] = DummyDecoder()
             kwargs['quantizer'] = DummyQuantizer()
+            is_mocked = True
         super().__init__(*args, **kwargs)
+        
+        if is_mocked:
+            self.normalizer = DummyNormalizer()
         
     def decode_coarse(self, latents: torch.Tensor) -> torch.Tensor:
         """
