@@ -1,0 +1,2 @@
+sharding_strategy: "FULL_SHARD"
+mixed_precision: "bf16"
