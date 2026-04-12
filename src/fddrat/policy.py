@@ -138,7 +138,11 @@ class FDDRATPolicy(BasePolicy):
         
         # 2. Tokenization via real encode
         latents, tokens = self.action_tokenizer.encode(batch['action'])
-        
+        # Real FSQ returns tokens [B, H_l]; DummyQuantizer returns [B, H_l, 1].
+        # Normalize to [B, H_l] so torch.cat with BOS works in both cases.
+        if tokens.dim() == 3 and tokens.shape[-1] == 1:
+            tokens = tokens.squeeze(-1)
+
         # 3. Masking behavior
         K_sampled = torch.randint(1, self.cfg.H_l + 1, (B,), device=z_v.device)
         self.dropout.eval()
@@ -146,10 +150,8 @@ class FDDRATPolicy(BasePolicy):
         # from corrupting the autograd version counter of the original latent tensor
         latents_masked = self.dropout(latents.clone(), eval_keep_k=K_sampled.tolist())
         self.dropout.train()
-        
-        # OAT AR model expects discrete tokens not continuous latents
-        # Apply dropout logic to tokens - for simplicity if tokenizer dropout isn't natively masking tokens:
-        tokens_masked = tokens[..., 0].clone() # [B, H_l]
+
+        tokens_masked = tokens.clone()  # [B, H_l]
         
         # Create BOS token tensor 
         bos_id = getattr(self.action_tokenizer, 'bos_id', self.vocab_size - 1)

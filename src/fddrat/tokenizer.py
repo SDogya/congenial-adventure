@@ -10,7 +10,7 @@ class DummyQuantizer(nn.Module):
         self.codebook_size = 1000   # 8*5*5*5, matches real FSQ
         self.dim = 4                # len(levels), matches FSQ.dim attribute
         self.embedding_dim = self.dim   # alias used by FDDRATPolicy
-    def forward(self, x): return x, torch.zeros(x.shape[:-1], dtype=torch.long, device=x.device).unsqueeze(-1)
+    def forward(self, x): return x, torch.zeros(x.shape[:-1], dtype=torch.long, device=x.device)  # [B, H_l] — matches real FSQ
     def indices_to_embedding(self, x): return torch.zeros(*x.shape[:-1], self.dim, device=x.device)
 
 class DummyDecoder(nn.Module):
