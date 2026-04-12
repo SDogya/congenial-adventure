@@ -26,8 +26,8 @@ class ExperimentConfig:
     dataset_path: str = "data/libero/libero10_N500.zarr"
     shape_meta: dict = field(default_factory=lambda: {
         "obs": {
-            "agentview_rgb":    {"type": "rgb",   "shape": [3, 76, 76]},
-            "eye_in_hand_rgb":  {"type": "rgb",   "shape": [3, 76, 76]},
+            "agentview_rgb":    {"type": "rgb",   "shape": [3, 84, 84]},
+            "eye_in_hand_rgb":  {"type": "rgb",   "shape": [3, 84, 84]},
             "robot_state":      {"type": "state", "shape": [8]},
         },
         "action": {"shape": [7]}
