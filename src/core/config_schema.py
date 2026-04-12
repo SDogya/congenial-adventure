@@ -26,9 +26,13 @@ class ExperimentConfig:
     dataset_path: str = "data/libero/libero10_N500.zarr"
     shape_meta: dict = field(default_factory=lambda: {
         "obs": {
-            "agentview_rgb":    {"type": "rgb",   "shape": [3, 84, 84]},
-            "eye_in_hand_rgb":  {"type": "rgb",   "shape": [3, 84, 84]},
-            "robot_state":      {"type": "state", "shape": [8]},
+            # Shape format is (H, W, C) — OAT's RobomimicRgbEncoder expects channels-last
+            "agentview_rgb":          {"type": "rgb",   "shape": [128, 128, 3]},
+            "robot0_eye_in_hand_rgb": {"type": "rgb",   "shape": [128, 128, 3]},
+            "robot0_eef_pos":         {"type": "state", "shape": [3]},
+            "robot0_eef_quat":        {"type": "state", "shape": [4]},
+            "robot0_gripper_qpos":    {"type": "state", "shape": [2]},
+            "task_uid":               {"type": "state", "shape": [1]},
         },
         "action": {"shape": [7]}
     })

@@ -68,18 +68,21 @@ class FDDRATPolicy(BasePolicy):
         if shape_meta is not None:
             from oat.perception.fused_obs_encoder import FusedObservationEncoder
             from omegaconf import OmegaConf
-            
+
             vision_dict = {"_target_": "oat.perception.robomimic_vision_encoder.RobomimicRgbEncoder", "crop_shape": [76, 76]}
             state_dict = {"_target_": "oat.perception.state_encoder.ProjectionStateEncoder", "out_dim": None}
-            
+
             self.obs_encoder = FusedObservationEncoder(
                 shape_meta=shape_meta,
                 vision_encoder=OmegaConf.create(vision_dict),
                 state_encoder=OmegaConf.create(state_dict)
             )
+            # obs_dim is determined by the actual encoder architecture, not cfg.D_v
+            obs_dim = self.obs_encoder.output_feature_dim()
         else:
             self.obs_encoder = nn.Identity()
-        
+            obs_dim = cfg.D_v
+
         # Vocab size logic parsed from quantizer
         if hasattr(self.action_tokenizer, 'quantizer'):
             self.vocab_size = self.action_tokenizer.quantizer.codebook_size + 1  # +1 for BOS
@@ -92,17 +95,19 @@ class FDDRATPolicy(BasePolicy):
         else:
             self.vocab_size = 1001   # FSQ(levels=[8,5,5,5]) codebook_size + 1
             self.embedding_dim = 4   # FSQ latent dim
-            
+
+        # cond_dim = actual encoder output; n_emb = AR transformer internal dim (cfg.D_v)
         self.ar_model = ARModelWithHiddens(
             vocab_size=self.vocab_size,
             max_seq_len=cfg.H_l + 1,
             max_cond_len=1,
-            cond_dim=cfg.D_v,
+            cond_dim=obs_dim,
             n_emb=cfg.D_v
         )
-        
-        self.crh = ContinuousResidualHead(H_a=cfg.H_a, D_a=cfg.D_a, D_v=cfg.D_v)
-        self.router = ShadowRouter(D_v=cfg.D_v)
+
+        # CRH and Router condition on obs features — must use obs_dim, not cfg.D_v
+        self.crh = ContinuousResidualHead(H_a=cfg.H_a, D_a=cfg.D_a, D_v=obs_dim)
+        self.router = ShadowRouter(D_v=obs_dim)
         self.loss_fn = FDDRATLoss(lambda_ratio=cfg.lambda_ratio, beta_mse=cfg.beta_mse)
         self.dropout = MaskedNestedDropout(dim=self.embedding_dim)
         
