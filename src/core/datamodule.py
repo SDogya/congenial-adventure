@@ -11,7 +11,7 @@ class DummyDataset(Dataset):
     def __getitem__(self, idx):
         # Mock tensors
         obs = torch.randn(self.cfg.model.D_v)
-        action = torch.randn(self.cfg.model.H_a, self.cfg.model.D_a)
+        action = torch.randn(self.cfg.model.H_a, self.cfg.model.D_a).clamp(-1, 1)
         return {"obs": obs, "action": action}
 
 class LitDataModule(pl.LightningDataModule):

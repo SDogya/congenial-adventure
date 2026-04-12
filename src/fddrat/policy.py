@@ -18,6 +18,31 @@ from src.fddrat.modules.router import ShadowRouter
 from src.fddrat.modules.loss import FDDRATLoss
 from src.fddrat.tokenizer import FDDRATTok
 
+class ARModelWithHiddens(AutoregressiveModel):
+    def forward(self, tokens: torch.LongTensor, cond: torch.Tensor):
+        T_tok = tokens.shape[1]
+        T_cond = cond.shape[1]
+        
+        tok_emb = self.tok_emb(tokens)
+        tok_emb = self.drop(tok_emb + self.tok_pos_emb[:, :T_tok, :].to(tokens.device))
+
+        cond_emb = self.cond_emb(cond)
+        cond_emb = self.drop(cond_emb + self.cond_pos_emb[:, :T_cond, :].to(cond.device))
+        cond_emb = self.encoder(cond_emb)
+
+        tgt_mask = (torch.triu(torch.ones(T_tok, T_tok, device=tokens.device)) == 1).transpose(0, 1)
+        tgt_mask = tgt_mask.float().masked_fill(tgt_mask == 0, float('-inf')).masked_fill(tgt_mask == 1, float(0.0))
+
+        out = self.decoder(
+            tgt=tok_emb,
+            memory=cond_emb,
+            tgt_mask=tgt_mask,
+            memory_mask=None,
+        )
+        hidden_states = self.ln_f(out)
+        logits = self.head(hidden_states)
+        return logits, hidden_states
+
 class FDDRATPolicy(BasePolicy):
     def __init__(self, cfg: FDDRATConfig):
         super().__init__()
@@ -35,7 +60,7 @@ class FDDRATPolicy(BasePolicy):
             self.vocab_size = 1025 # Safe fallback if quantizer mock fails structurally
             self.embedding_dim = 256
             
-        self.ar_model = AutoregressiveModel(
+        self.ar_model = ARModelWithHiddens(
             vocab_size=self.vocab_size,
             max_seq_len=cfg.H_l + 1,
             max_cond_len=1,
@@ -48,16 +73,7 @@ class FDDRATPolicy(BasePolicy):
         self.loss_fn = FDDRATLoss(lambda_ratio=cfg.lambda_ratio, beta_mse=cfg.beta_mse)
         self.dropout = MaskedNestedDropout(dim=self.embedding_dim)
         
-        # Keep register_forward_hook mechanism
-        self._hooked_hidden = None
-        def hook_fn(module, inp, out):
-            self._hooked_hidden = out
-            
-        if hasattr(self.ar_model, 'decoder'):
-            # The OAT implementation has self.decoder returning the output
-            self.ar_model.decoder.layers[-1].register_forward_hook(hook_fn)
-        else:
-            self.ar_model.register_forward_hook(hook_fn)
+        # Removed hook mechanisms to avoid FSDP sync deadlock
         
     def forward(self, batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         """
@@ -86,17 +102,7 @@ class FDDRATPolicy(BasePolicy):
         tokens_ar = torch.cat([bos_tokens, tokens_masked], dim=1) # [B, H_l+1]
         
         # 4. AR Model Forward
-        self._hooked_hidden = None
-        
-        # The OAT model expects spatial conditioning [B, max_cond_len, cond_dim]
-        cond_input = z_v.unsqueeze(1) # [B, 1, D_v]
-        logits = self.ar_model(tokens_ar, cond=cond_input) # Assuming context/z_v mapping is internal or generic
-        
-        # Retrieve mapped hidden
-        if self._hooked_hidden is None:
-            self._hooked_hidden = torch.zeros(B, self.cfg.H_l + 1, self.cfg.D_v, device=z_v.device)
-            
-        hidden_states = self._hooked_hidden
+        logits, hidden_states = self.ar_model(tokens_ar, cond=cond_input)
         
         # 5. Decoupled Routing Slicing
         q_t = hidden_states[:, 1:, :] # [B, H_l, D]

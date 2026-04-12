@@ -10,6 +10,7 @@ class FSDPConfig:
 class FDDRATConfig:
     lambda_ratio: float = 1.0
     beta_mse: float = 1.0
+    target_ratio: float = 0.5
     H_a: int = 16
     D_a: int = 256
     D_v: int = 768
