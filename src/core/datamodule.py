@@ -3,28 +3,29 @@ import torch
 from torch.utils.data import DataLoader, Dataset
 from src.core.config_schema import ExperimentConfig
 
-class DummyDataset(Dataset):
-    def __init__(self, cfg: ExperimentConfig):
-        self.cfg = cfg
-    def __len__(self):
-        return 100
-    def __getitem__(self, idx):
-        # Mock tensors
-        obs = torch.randn(self.cfg.model.D_v)
-        action = torch.randn(self.cfg.model.H_a, self.cfg.model.D_a).clamp(-1, 1)
-        return {"obs": obs, "action": action}
+from oat.dataset.zarr_dataset import ZarrDataset
 
 class LitDataModule(pl.LightningDataModule):
     """
-    LightningDataModule orchestrating I/O operations.
+    LightningDataModule orchestrating I/O operations with ZarrDataset.
     """
     def __init__(self, cfg: ExperimentConfig):
         super().__init__()
         self.cfg = cfg
+        self.normalizer = None
 
     def setup(self, stage: str = None) -> None:
-        self.train_dataset = DummyDataset(self.cfg)
-        self.val_dataset = DummyDataset(self.cfg)
+        obs_keys = [k for k in self.cfg.shape_meta["obs"].keys()]
+        self.train_dataset = ZarrDataset(
+            zarr_path=self.cfg.dataset_path,
+            obs_keys=obs_keys,
+            action_key='action',
+            n_obs_steps=1,
+            n_action_steps=self.cfg.model.H_a,
+            val_ratio=0.1
+        )
+        self.val_dataset = self.train_dataset.get_validation_dataset()
+        self.normalizer = self.train_dataset.get_normalizer()
 
     def train_dataloader(self) -> DataLoader:
         return DataLoader(

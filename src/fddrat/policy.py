@@ -44,13 +44,28 @@ class ARModelWithHiddens(AutoregressiveModel):
         return logits, hidden_states
 
 class FDDRATPolicy(BasePolicy):
-    def __init__(self, cfg: FDDRATConfig):
+    def __init__(self, cfg: FDDRATConfig, shape_meta: dict = None):
         super().__init__()
         self.cfg = cfg
-        
-        # Real modules
-        self.obs_encoder = nn.Identity() # Placeholder mapping as DummyEncoder was removed
+        self.shape_meta = shape_meta
         self.action_tokenizer = FDDRATTok()
+        self.normalizer = None
+        
+        # 1. Observation Flow (Multimodal Fused Encoder)
+        if shape_meta is not None:
+            from oat.perception.fused_obs_encoder import FusedObservationEncoder
+            from omegaconf import OmegaConf
+            
+            vision_dict = {"_target_": "oat.perception.robomimic_vision_encoder.RobomimicRgbEncoder", "crop_shape": [76, 76]}
+            state_dict = {"_target_": "oat.perception.state_encoder.ProjectionStateEncoder", "out_dim": None}
+            
+            self.obs_encoder = FusedObservationEncoder(
+                shape_meta=shape_meta,
+                vision_encoder=OmegaConf.create(vision_dict),
+                state_encoder=OmegaConf.create(state_dict)
+            )
+        else:
+            self.obs_encoder = nn.Identity()
         
         # Vocab size logic parsed from quantizer
         if hasattr(self.action_tokenizer, 'quantizer'):
@@ -74,6 +89,10 @@ class FDDRATPolicy(BasePolicy):
         self.dropout = MaskedNestedDropout(dim=self.embedding_dim)
         
         # Removed hook mechanisms to avoid FSDP sync deadlock
+        
+    def set_normalizer(self, normalizer):
+        self.obs_encoder.set_normalizer(normalizer)
+        self.normalizer = normalizer
         
     def forward(self, batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         """
@@ -113,17 +132,15 @@ class FDDRATPolicy(BasePolicy):
         
         # 6. CRH Integration & Denormalization
         a_coarse_norm = self.action_tokenizer.decode_coarse(latents_masked)
+        a_coarse_norm_detached = a_coarse_norm.detach()
         
-        if hasattr(self.action_tokenizer, 'normalizer') and 'action' in self.action_tokenizer.normalizer:
-            a_coarse_denorm = self.action_tokenizer.normalizer['action'].unnormalize(a_coarse_norm)
-        else:
-            a_coarse_denorm = a_coarse_norm
-
-        a_coarse_detached = a_coarse_denorm.detach()
+        delta_a_norm = self.crh(a_coarse_norm_detached, z_v)
         
-        delta_a = self.crh(a_coarse_detached, z_v)
-        residual_target = batch['action'] - a_coarse_detached
+        a_target_norm = batch['action']
+        if self.normalizer is not None:
+            a_target_norm = self.normalizer['action'].normalize(a_target_norm)
         
+        residual_target = a_target_norm - a_coarse_norm_detached        
         targets = tokens_masked
         target_ratio = getattr(self.cfg, 'target_ratio', 0.5)
         tau_target = torch.full_like(p_stop_logits, target_ratio)
@@ -133,7 +150,7 @@ class FDDRATPolicy(BasePolicy):
             targets=targets,
             p_stop_logits=p_stop_logits,
             tau_target=tau_target,
-            delta_a=delta_a,
+            delta_a=delta_a_norm,
             residual_target=residual_target,
             K_sampled=K_sampled,
             H_l=self.cfg.H_l

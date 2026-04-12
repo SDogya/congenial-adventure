@@ -17,7 +17,11 @@ class LitSystem(pl.LightningModule):
         self.cfg = cfg
         
         # Initialize FDDRAT architecture
-        self.model = FDDRATPolicy(cfg.model)
+        self.model = FDDRATPolicy(cfg.model, shape_meta=cfg.shape_meta)
+        
+    def setup(self, stage: str = None) -> None:
+        if self.trainer and getattr(self.trainer, 'datamodule', None):
+            self.model.set_normalizer(self.trainer.datamodule.normalizer)
         
     def training_step(self, batch: Any, batch_idx: int) -> Dict[str, torch.Tensor]:
         out = self.model(batch)
