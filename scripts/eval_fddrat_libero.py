@@ -84,7 +84,22 @@ def eval_policy_sim(
         device = torch.device(device)
         policy.to(device)
         policy.eval()
-        
+
+        # Compile static CUDA graphs for decoder and CRH, then warm up so
+        # torch.compile JIT does not pollute the first p99 latency measurements.
+        print("Compiling Static CUDA Graphs for decoder and CRH...")
+        policy.compile_decoder()
+        dummy_obs = (
+            {k: torch.zeros((1,) + tuple(v['shape']), device=device)
+             for k, v in policy.shape_meta['obs'].items()}
+            if policy.shape_meta else torch.zeros((1, 3, 224, 224), device=device)
+        )
+        try:
+            policy.predict_action(dummy_obs)
+            print("Warm-up complete.")
+        except Exception as e:
+            print(f"Warm-up exception skipped: {e}")
+
         # run eval
         print(f"Running evaluation on {ckpt}")
         env_runner: BaseRunner = hydra.utils.instantiate(

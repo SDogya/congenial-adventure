@@ -202,93 +202,89 @@ class FDDRATPolicy(BasePolicy):
         self.action_tokenizer.decoder = torch.compile(self.action_tokenizer.decoder)
         self.crh = torch.compile(self.crh)
 
+    @torch.inference_mode()
     def predict_action(self, obs: torch.Tensor) -> torch.Tensor:
         """
         Any-Time Routing Inference sequence.
         """
-        with torch.no_grad():
-            B = obs.size(0)
-            z_v = self.obs_encoder(obs)
-            
-            # Start with BOS 
-            bos_id = getattr(self.action_tokenizer, 'bos_id', self.vocab_size - 1)
-            tokens_in = torch.full((B, 1), bos_id, device=obs.device, dtype=torch.long)
-            
-            # Latents sequence for evaluation track
-            latents = torch.zeros(B, 1, self.embedding_dim, device=obs.device)
-            if hasattr(self.action_tokenizer, 'bos_id_emb'):
-                 latents = self.action_tokenizer.bos_id_emb.expand(B, 1, -1)
-            
-            tokens_generated = []
-            
-            # Autoregressive generation boundary mapping
-            threshold = 0.5 
-            
-            cond_input = z_v.unsqueeze(1)
-            for t in range(self.cfg.H_l):
-                logits_step, hidden_states = self.ar_model(tokens_in, cond=cond_input)
-                
-                # Take argmax at current step
-                next_token = torch.argmax(logits_step[:, -1, :], dim=-1)
-                tokens_generated.append(next_token)
-                tokens_in = torch.cat([tokens_in, next_token.unsqueeze(1)], dim=1)
-                
-                # Convert token index back to latent embedding
-                if hasattr(self.action_tokenizer, 'quantizer'):
-                    next_latent = self.action_tokenizer.quantizer.indices_to_embedding(next_token.unsqueeze(-1))
-                else:
-                    next_latent = torch.zeros(B, 1, self.embedding_dim, device=obs.device)
-                    
-                latents = torch.cat([latents, next_latent], dim=1)
-                
-                # Early Exit Check. Skipped at t=0 (only BOS in context — routing signal not yet meaningful).
-                # Minimum output is always 1 token by design.
-                if t > 0:
-                    q_t = hidden_states[:, -1:, :]
-                    k_prev = hidden_states[:, -2:-1, :]
-                    
-                    p_stop_logit = self.router(q_t, k_prev, z_v)
-                    p_stop_prob = torch.sigmoid(p_stop_logit)
-                    
-                    if (p_stop_prob > threshold).all():
-                         break
-            
-            # Pad early terminated execution up to H_l
-            # CRITICAL: Zero-Padding Constraint (task6.md B2)
-            # Padding MUST use torch.zeros to prevent CRH hallucinations.
-            # Non-zero embeddings (e.g. from quantizer lookup of mask tokens)
-            # cause catastrophic residual outputs from the static CRH network.
-            curr_len = len(tokens_generated)
-            if curr_len < self.cfg.H_l:
-                pad_size = self.cfg.H_l - curr_len
-                # Strict zero-padding for latent embeddings
-                padded_latents = torch.zeros(
-                    B, pad_size, self.embedding_dim,
-                    device=obs.device, dtype=latents.dtype
-                )
-                latents = torch.cat([latents, padded_latents], dim=1)
-            
-            # Strip BOS to extract true token span
-            latents_filtered = latents[:, 1:, :]
-            
-            # 1. Decode coarse trajectory
-            a_coarse_norm = self.action_tokenizer.decode_coarse(latents_filtered)
-            
-            # 2. CRH refinement step IN NORMALIZED SPACE
-            delta_a_norm = self.crh(a_coarse_norm, z_v)
-            
-            # 3. Action Output Contract Match
-            a_final_norm = a_coarse_norm + delta_a_norm
-            
-            # 4. Denormalize STRICTLY AT THE END
-            if len(self.normalizer) > 0:
-                a_final = self.normalizer['action'].unnormalize(a_final_norm)
-            elif hasattr(self.action_tokenizer, 'normalizer') and 'action' in self.action_tokenizer.normalizer:
-                # Legacy fallback if needed
-                a_final = self.action_tokenizer.normalizer['action'].unnormalize(a_final_norm)
+        B = obs.size(0)
+        z_v = self.obs_encoder(obs)
+
+        # Start with BOS
+        bos_id = getattr(self.action_tokenizer, 'bos_id', self.vocab_size - 1)
+        tokens_in = torch.full((B, 1), bos_id, device=obs.device, dtype=torch.long)
+
+        # Latents sequence for evaluation track
+        latents = torch.zeros(B, 1, self.embedding_dim, device=obs.device)
+        if hasattr(self.action_tokenizer, 'bos_id_emb'):
+            latents = self.action_tokenizer.bos_id_emb.expand(B, 1, -1)
+
+        tokens_generated = []
+        threshold = 0.5
+
+        cond_input = z_v.unsqueeze(1)
+        for t in range(self.cfg.H_l):
+            logits_step, hidden_states = self.ar_model(tokens_in, cond=cond_input)
+
+            # Take argmax at current step
+            next_token = torch.argmax(logits_step[:, -1, :], dim=-1)
+            tokens_generated.append(next_token)
+            tokens_in = torch.cat([tokens_in, next_token.unsqueeze(1)], dim=1)
+
+            # Convert token index back to latent embedding
+            if hasattr(self.action_tokenizer, 'quantizer'):
+                next_latent = self.action_tokenizer.quantizer.indices_to_embedding(next_token.unsqueeze(-1))
             else:
-                a_final = a_final_norm
-            
-            # Safe slice fallback to H_a if n_action_steps missing
-            n_slice = getattr(self.cfg, 'n_action_steps', getattr(self.cfg, 'H_a', 16))
-            return {"action": a_final[:, :n_slice]}
+                next_latent = torch.zeros(B, 1, self.embedding_dim, device=obs.device)
+
+            latents = torch.cat([latents, next_latent], dim=1)
+
+            # Early Exit Check. Skipped at t=0 (only BOS in context — routing signal not yet meaningful).
+            # Minimum output is always 1 token by design.
+            if t > 0:
+                q_t = hidden_states[:, -1:, :]
+                k_prev = hidden_states[:, -2:-1, :]
+
+                p_stop_logit = self.router(q_t, k_prev, z_v)
+                p_stop_prob = torch.sigmoid(p_stop_logit)
+
+                if (p_stop_prob > threshold).all():
+                    break
+
+        # Pad early terminated execution up to H_l
+        # CRITICAL: Zero-Padding Constraint (task6.md B2)
+        # Padding MUST use torch.zeros to prevent CRH hallucinations.
+        # Non-zero embeddings (e.g. from quantizer lookup of mask tokens)
+        # cause catastrophic residual outputs from the static CRH network.
+        curr_len = len(tokens_generated)
+        if curr_len < self.cfg.H_l:
+            pad_size = self.cfg.H_l - curr_len
+            padded_latents = torch.zeros(
+                B, pad_size, self.embedding_dim,
+                device=obs.device, dtype=latents.dtype
+            )
+            latents = torch.cat([latents, padded_latents], dim=1)
+
+        # Strip BOS to extract true token span
+        latents_filtered = latents[:, 1:, :]
+
+        # 1. Decode coarse trajectory
+        a_coarse_norm = self.action_tokenizer.decode_coarse(latents_filtered)
+
+        # 2. CRH refinement step IN NORMALIZED SPACE
+        delta_a_norm = self.crh(a_coarse_norm, z_v)
+
+        # 3. Action Output Contract Match
+        a_final_norm = a_coarse_norm + delta_a_norm
+
+        # 4. Denormalize STRICTLY AT THE END
+        if len(self.normalizer) > 0:
+            a_final = self.normalizer['action'].unnormalize(a_final_norm)
+        elif hasattr(self.action_tokenizer, 'normalizer') and 'action' in self.action_tokenizer.normalizer:
+            a_final = self.action_tokenizer.normalizer['action'].unnormalize(a_final_norm)
+        else:
+            a_final = a_final_norm
+
+        # Safe slice fallback to H_a if n_action_steps missing
+        n_slice = getattr(self.cfg, 'n_action_steps', getattr(self.cfg, 'H_a', 16))
+        return {"action": a_final[:, :n_slice]}

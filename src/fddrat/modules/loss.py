@@ -28,8 +28,13 @@ class FDDRATLoss(nn.Module):
         
         loss_ce = F.cross_entropy(logits_flat, targets_flat, ignore_index=-1)
         
-        # Ratio Loss
-        loss_ratio = F.binary_cross_entropy_with_logits(p_stop_logits.view(-1), tau_target.view(-1).float())
+        # Ratio Loss — forced to float32 even under bf16 mixed precision,
+        # because BCEWithLogitsLoss is numerically unstable in bf16.
+        with torch.autocast(device_type=logits.device.type, enabled=False):
+            loss_ratio = F.binary_cross_entropy_with_logits(
+                p_stop_logits.view(-1).float(),
+                tau_target.view(-1).float(),
+            )
         
         # MSE Loss with strict masking for sequence end boundary rules
         mse_loss_raw = F.mse_loss(delta_a, residual_target, reduction='none') # [B, H_a, D_a]
