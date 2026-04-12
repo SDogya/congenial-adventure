@@ -36,6 +36,15 @@ class LazyZarrDataset(ZarrDataset):
         finally:
             ReplayBuffer.copy_from_path = _orig  # always restore
 
+    def _sample_to_data(self, sample):
+        data = super()._sample_to_data(sample)
+        # ZarrDataset keeps uint8 arrays as-is; CUDA conv2d requires float.
+        # Cast every rgb obs key to float32 here (before collation into tensors).
+        for k in self.numeric_obs_keys:
+            if 'rgb' in k or 'image' in k:
+                data['obs'][k] = data['obs'][k].astype('float32')
+        return data
+
     def get_normalizer(self, mode='limits', **kwargs):
         """Fit normalizer only on action + non-RGB state keys."""
         non_rgb = [k for k in self.numeric_obs_keys if 'rgb' not in k and 'image' not in k]
