@@ -159,7 +159,8 @@ class FDDRATPolicy(BasePolicy):
         tokens_ar = torch.cat([bos_tokens, tokens_masked], dim=1) # [B, H_l+1]
         
         # 4. AR Model Forward
-        cond_input = z_v.unsqueeze(1)
+        # FusedObsEncoder returns [B, To, D] (3D); nn.Identity returns [B, D] (2D)
+        cond_input = z_v if z_v.dim() == 3 else z_v.unsqueeze(1)
         logits, hidden_states = self.ar_model(tokens_ar, cond=cond_input)
         
         # 5. Decoupled Routing Slicing
@@ -229,7 +230,7 @@ class FDDRATPolicy(BasePolicy):
         tokens_generated = []
         threshold = 0.5
 
-        cond_input = z_v.unsqueeze(1)
+        cond_input = z_v if z_v.dim() == 3 else z_v.unsqueeze(1)
         for t in range(self.cfg.H_l):
             logits_step, hidden_states = self.ar_model(tokens_in, cond=cond_input)
 
