@@ -1,0 +1,3 @@
+use_fsdp: false
+mixed_precision: "bf16"
+sharding_strategy: "FULL_SHARD"   # unused when use_fsdp=false, kept for schema compatibility

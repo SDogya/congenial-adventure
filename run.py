@@ -47,14 +47,18 @@ def main(cfg: ExperimentConfig) -> None:
     )
     
     # 5. Trainer Initialization
-    fsdp_strategy = FSDPStrategy(sharding_strategy=cfg.strategy.sharding_strategy)
+    if cfg.strategy.use_fsdp:
+        strategy = FSDPStrategy(sharding_strategy=cfg.strategy.sharding_strategy)
+    else:
+        strategy = "auto"   # PyTorch Lightning picks DDP/single-GPU automatically
+
     trainer = pl.Trainer(
         logger=logger,
         callbacks=[checkpoint_callback],
         max_epochs=10,
-        strategy=fsdp_strategy,
+        strategy=strategy,
         precision=cfg.strategy.mixed_precision,
-        sync_batchnorm=True,
+        sync_batchnorm=cfg.strategy.use_fsdp,  # sync_batchnorm requires distributed
         accelerator="auto",
         devices="auto"
     )

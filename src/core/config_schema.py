@@ -1,10 +1,11 @@
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Optional
 
 @dataclass
 class FSDPConfig:
     sharding_strategy: str = "FULL_SHARD"
     mixed_precision: str = "bf16"
+    use_fsdp: bool = True   # False → single-GPU/DDP (e.g. Kaggle T4)
 
 @dataclass
 class FDDRATConfig:
@@ -12,9 +13,10 @@ class FDDRATConfig:
     beta_mse: float = 1.0
     target_ratio: float = 0.5
     H_a: int = 16
-    D_a: int = 256
+    D_a: int = 7    # action dimension (matches shape_meta action.shape[0])
     D_v: int = 768
     H_l: int = 64
+    tokenizer_ckpt: Optional[str] = None   # path to OAT tokenizer .ckpt; None → mock/dry-run
 
 @dataclass
 class ExperimentConfig:

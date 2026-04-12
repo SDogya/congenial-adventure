@@ -17,7 +17,7 @@ from src.core.config_schema import FDDRATConfig
 from src.fddrat.modules.crh import ContinuousResidualHead
 from src.fddrat.modules.router import ShadowRouter
 from src.fddrat.modules.loss import FDDRATLoss
-from src.fddrat.tokenizer import FDDRATTok
+from src.fddrat.tokenizer import FDDRATTok, DummyDecoder, DummyQuantizer, DummyNormalizer
 
 class ARModelWithHiddens(AutoregressiveModel):
     def forward(self, tokens: torch.LongTensor, cond: torch.Tensor):
@@ -49,8 +49,17 @@ class FDDRATPolicy(BasePolicy):
         super().__init__()
         self.cfg = cfg
         self.shape_meta = shape_meta
-        self.action_tokenizer = FDDRATTok()
-        
+        if cfg.tokenizer_ckpt:
+            self.action_tokenizer = FDDRATTok._load_from_oat_ckpt(cfg.tokenizer_ckpt)
+        else:
+            # Dimension-aware mock: DummyDecoder must return [B, H_a, D_a] to match CRH input
+            self.action_tokenizer = FDDRATTok(
+                encoder=nn.Identity(),
+                decoder=DummyDecoder(H_a=cfg.H_a, D_a=cfg.D_a),
+                quantizer=DummyQuantizer(),
+            )
+            self.action_tokenizer.normalizer = DummyNormalizer()
+
         # nn.ModuleDict ensures PyTorch Lightning serializes normalizer
         # statistics into checkpoints (Checkpoint Void prevention)
         self.normalizer = nn.ModuleDict()
@@ -73,11 +82,16 @@ class FDDRATPolicy(BasePolicy):
         
         # Vocab size logic parsed from quantizer
         if hasattr(self.action_tokenizer, 'quantizer'):
-            self.vocab_size = self.action_tokenizer.quantizer.codebook_size + 1 # Account for BOS
-            self.embedding_dim = self.action_tokenizer.quantizer.embedding_dim
+            self.vocab_size = self.action_tokenizer.quantizer.codebook_size + 1  # +1 for BOS
+            # Real FSQ uses `.dim`; DummyQuantizer provides `.embedding_dim` as alias for compat
+            self.embedding_dim = getattr(
+                self.action_tokenizer.quantizer,
+                'embedding_dim',
+                self.action_tokenizer.quantizer.dim,
+            )
         else:
-            self.vocab_size = 1025 # Safe fallback if quantizer mock fails structurally
-            self.embedding_dim = 256
+            self.vocab_size = 1001   # FSQ(levels=[8,5,5,5]) codebook_size + 1
+            self.embedding_dim = 4   # FSQ latent dim
             
         self.ar_model = ARModelWithHiddens(
             vocab_size=self.vocab_size,
@@ -105,7 +119,8 @@ class FDDRATPolicy(BasePolicy):
             normalizer: LinearNormalizer from ZarrDataset.get_normalizer().
                         Contains 'action' key with scale/offset params.
         """
-        self.obs_encoder.set_normalizer(normalizer)
+        if hasattr(self.obs_encoder, 'set_normalizer'):
+            self.obs_encoder.set_normalizer(normalizer)
         self.normalizer.update({'action': normalizer['action']})
         
     def forward(self, batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
@@ -122,7 +137,9 @@ class FDDRATPolicy(BasePolicy):
         # 3. Masking behavior
         K_sampled = torch.randint(1, self.cfg.H_l + 1, (B,), device=z_v.device)
         self.dropout.eval()
-        latents_masked = self.dropout(latents, eval_keep_k=K_sampled.tolist())
+        # .clone() prevents MaskedNestedDropout's in-place mask assignment
+        # from corrupting the autograd version counter of the original latent tensor
+        latents_masked = self.dropout(latents.clone(), eval_keep_k=K_sampled.tolist())
         self.dropout.train()
         
         # OAT AR model expects discrete tokens not continuous latents
@@ -224,7 +241,8 @@ class FDDRATPolicy(BasePolicy):
                     
                 latents = torch.cat([latents, next_latent], dim=1)
                 
-                # Early Exit Check on steps t > 0
+                # Early Exit Check. Skipped at t=0 (only BOS in context — routing signal not yet meaningful).
+                # Minimum output is always 1 token by design.
                 if t > 0:
                     q_t = hidden_states[:, -1:, :]
                     k_prev = hidden_states[:, -2:-1, :]
