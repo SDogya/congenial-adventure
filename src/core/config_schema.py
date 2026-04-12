@@ -21,14 +21,15 @@ class ExperimentConfig:
     seed: int = 42
     batch_size: int = 32
     learning_rate: float = 3e-4
-    dataset_path: str = "data/libero_10.zarr"
+    dataset_path: str = "data/libero/libero10_N500.zarr"
     shape_meta: dict = field(default_factory=lambda: {
         "obs": {
-            "agentview_image": {"type": "rgb", "shape": [3, 224, 224]},
-            "robot0_eye_in_hand_image": {"type": "rgb", "shape": [3, 224, 224]},
+            "agentview_rgb": {"type": "rgb", "shape": [128, 128, 3]},
+            "robot0_eye_in_hand_rgb": {"type": "rgb", "shape": [128, 128, 3]},
             "robot0_eef_pos": {"type": "state", "shape": [3]},
             "robot0_eef_quat": {"type": "state", "shape": [4]},
-            "robot0_gripper_qpos": {"type": "state", "shape": [2]}
+            "robot0_gripper_qpos": {"type": "state", "shape": [2]},
+            "task_uid": {"type": "state", "shape": [1]}
         },
         "action": {"shape": [7]}
     })

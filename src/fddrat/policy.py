@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 from typing import Dict, Any, List
+from oat.model.common.normalizer import LinearNormalizer
 
 try:
     from oat.policy.base_policy import BasePolicy
@@ -49,7 +50,10 @@ class FDDRATPolicy(BasePolicy):
         self.cfg = cfg
         self.shape_meta = shape_meta
         self.action_tokenizer = FDDRATTok()
-        self.normalizer = None
+        
+        # nn.ModuleDict ensures PyTorch Lightning serializes normalizer
+        # statistics into checkpoints (Checkpoint Void prevention)
+        self.normalizer = nn.ModuleDict()
         
         # 1. Observation Flow (Multimodal Fused Encoder)
         if shape_meta is not None:
@@ -90,9 +94,19 @@ class FDDRATPolicy(BasePolicy):
         
         # Removed hook mechanisms to avoid FSDP sync deadlock
         
-    def set_normalizer(self, normalizer):
+    def set_normalizer(self, normalizer: LinearNormalizer) -> None:
+        """Inject dataset normalizer into policy for checkpoint serialization.
+        
+        Uses nn.ModuleDict.update() to register normalizer as a proper
+        submodule, enabling PyTorch Lightning to serialize scale/offset
+        statistics into the checkpoint state_dict.
+        
+        Args:
+            normalizer: LinearNormalizer from ZarrDataset.get_normalizer().
+                        Contains 'action' key with scale/offset params.
+        """
         self.obs_encoder.set_normalizer(normalizer)
-        self.normalizer = normalizer
+        self.normalizer.update({'action': normalizer['action']})
         
     def forward(self, batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         """
@@ -137,7 +151,7 @@ class FDDRATPolicy(BasePolicy):
         delta_a_norm = self.crh(a_coarse_norm_detached, z_v)
         
         a_target_norm = batch['action']
-        if self.normalizer is not None:
+        if len(self.normalizer) > 0:
             a_target_norm = self.normalizer['action'].normalize(a_target_norm)
         
         residual_target = a_target_norm - a_coarse_norm_detached        
@@ -222,20 +236,19 @@ class FDDRATPolicy(BasePolicy):
                          break
             
             # Pad early terminated execution up to H_l
+            # CRITICAL: Zero-Padding Constraint (task6.md B2)
+            # Padding MUST use torch.zeros to prevent CRH hallucinations.
+            # Non-zero embeddings (e.g. from quantizer lookup of mask tokens)
+            # cause catastrophic residual outputs from the static CRH network.
             curr_len = len(tokens_generated)
             if curr_len < self.cfg.H_l:
-                 pad_size = self.cfg.H_l - curr_len
-                 pad_id = getattr(self.cfg, 'mask_id', 0)
-                 pad_tokens = torch.full((B, pad_size), pad_id, device=obs.device)
-                 for i in range(pad_size):
-                     tokens_generated.append(pad_tokens[:, i])
-                 
-                 # Assemble full padded tensor
-                 if hasattr(self.action_tokenizer, 'quantizer'):
-                     padded_latents = self.action_tokenizer.quantizer.indices_to_embedding(pad_tokens.unsqueeze(-1))
-                 else:
-                     padded_latents = torch.zeros(B, pad_size, self.embedding_dim, device=obs.device)
-                 latents = torch.cat([latents, padded_latents], dim=1)
+                pad_size = self.cfg.H_l - curr_len
+                # Strict zero-padding for latent embeddings
+                padded_latents = torch.zeros(
+                    B, pad_size, self.embedding_dim,
+                    device=obs.device, dtype=latents.dtype
+                )
+                latents = torch.cat([latents, padded_latents], dim=1)
             
             # Strip BOS to extract true token span
             latents_filtered = latents[:, 1:, :]
@@ -250,7 +263,7 @@ class FDDRATPolicy(BasePolicy):
             a_final_norm = a_coarse_norm + delta_a_norm
             
             # 4. Denormalize STRICTLY AT THE END
-            if self.normalizer is not None:
+            if len(self.normalizer) > 0:
                 a_final = self.normalizer['action'].unnormalize(a_final_norm)
             elif hasattr(self.action_tokenizer, 'normalizer') and 'action' in self.action_tokenizer.normalizer:
                 # Legacy fallback if needed
