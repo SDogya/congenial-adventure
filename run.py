@@ -59,7 +59,11 @@ def main(cfg: ExperimentConfig) -> None:
         devices="auto"
     )
     
-    # 6. Execute Training
+    # 6. Explicit Initialization (Tech Lead Checkpoint)
+    datamodule.setup()
+    system.model.set_normalizer(datamodule.normalizer)
+    
+    # 7. Execute Training
     trainer.fit(model=system, datamodule=datamodule)
 
 if __name__ == "__main__":

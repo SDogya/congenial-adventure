@@ -243,17 +243,20 @@ class FDDRATPolicy(BasePolicy):
             # 1. Decode coarse trajectory
             a_coarse_norm = self.action_tokenizer.decode_coarse(latents_filtered)
             
-            # 2. Denormalize explicitly  
-            if hasattr(self.action_tokenizer, 'normalizer') and 'action' in self.action_tokenizer.normalizer:
-                 a_coarse = self.action_tokenizer.normalizer['action'].unnormalize(a_coarse_norm)
-            else:
-                 a_coarse = a_coarse_norm
-                 
-            # 3. CRH refinement step
-            delta_a = self.crh(a_coarse, z_v)
+            # 2. CRH refinement step IN NORMALIZED SPACE
+            delta_a_norm = self.crh(a_coarse_norm, z_v)
             
-            # Action Output Contract Match
-            a_final = a_coarse + delta_a
+            # 3. Action Output Contract Match
+            a_final_norm = a_coarse_norm + delta_a_norm
+            
+            # 4. Denormalize STRICTLY AT THE END
+            if self.normalizer is not None:
+                a_final = self.normalizer['action'].unnormalize(a_final_norm)
+            elif hasattr(self.action_tokenizer, 'normalizer') and 'action' in self.action_tokenizer.normalizer:
+                # Legacy fallback if needed
+                a_final = self.action_tokenizer.normalizer['action'].unnormalize(a_final_norm)
+            else:
+                a_final = a_final_norm
             
             # Safe slice fallback to H_a if n_action_steps missing
             n_slice = getattr(self.cfg, 'n_action_steps', getattr(self.cfg, 'H_a', 16))
