@@ -1,4 +1,5 @@
 defaults:
+  - experiment_config   # loads ExperimentConfig dataclass (provides shape_meta, dataset_path defaults)
   - _self_
   - model: baseline
   - strategy: fsdp
