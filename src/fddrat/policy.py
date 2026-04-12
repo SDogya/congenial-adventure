@@ -102,6 +102,7 @@ class FDDRATPolicy(BasePolicy):
         tokens_ar = torch.cat([bos_tokens, tokens_masked], dim=1) # [B, H_l+1]
         
         # 4. AR Model Forward
+        cond_input = z_v.unsqueeze(1)
         logits, hidden_states = self.ar_model(tokens_ar, cond=cond_input)
         
         # 5. Decoupled Routing Slicing
@@ -177,8 +178,7 @@ class FDDRATPolicy(BasePolicy):
             
             cond_input = z_v.unsqueeze(1)
             for t in range(self.cfg.H_l):
-                self._hooked_hidden = None
-                logits_step = self.ar_model(tokens_in, cond=cond_input)
+                logits_step, hidden_states = self.ar_model(tokens_in, cond=cond_input)
                 
                 # Take argmax at current step
                 next_token = torch.argmax(logits_step[:, -1, :], dim=-1)
@@ -194,10 +194,9 @@ class FDDRATPolicy(BasePolicy):
                 latents = torch.cat([latents, next_latent], dim=1)
                 
                 # Early Exit Check on steps t > 0
-                if t > 0 and self._hooked_hidden is not None:
-                    # Fetch hooked state dynamically 
-                    q_t = self._hooked_hidden[:, -1:, :]
-                    k_prev = self._hooked_hidden[:, -2:-1, :]
+                if t > 0:
+                    q_t = hidden_states[:, -1:, :]
+                    k_prev = hidden_states[:, -2:-1, :]
                     
                     p_stop_logit = self.router(q_t, k_prev, z_v)
                     p_stop_prob = torch.sigmoid(p_stop_logit)
