@@ -134,6 +134,10 @@ class FDDRATPolicy(BasePolicy):
         """
         # 1. Vision feature extraction
         z_v = self.obs_encoder(batch['obs'])
+        # FusedObsEncoder returns [B, To, D] with To=1; squeeze to [B, D]
+        # so CRH and Router (which expect 2D) work correctly
+        if z_v.dim() == 3:
+            z_v = z_v.squeeze(1)
         B = z_v.size(0)
         
         # 2. Tokenization via real encode
@@ -159,8 +163,7 @@ class FDDRATPolicy(BasePolicy):
         tokens_ar = torch.cat([bos_tokens, tokens_masked], dim=1) # [B, H_l+1]
         
         # 4. AR Model Forward
-        # FusedObsEncoder returns [B, To, D] (3D); nn.Identity returns [B, D] (2D)
-        cond_input = z_v if z_v.dim() == 3 else z_v.unsqueeze(1)
+        cond_input = z_v.unsqueeze(1)  # [B, 1, D] for AR cross-attention
         logits, hidden_states = self.ar_model(tokens_ar, cond=cond_input)
         
         # 5. Decoupled Routing Slicing
@@ -217,6 +220,8 @@ class FDDRATPolicy(BasePolicy):
         """
         B = obs.size(0)
         z_v = self.obs_encoder(obs)
+        if z_v.dim() == 3:
+            z_v = z_v.squeeze(1)
 
         # Start with BOS
         bos_id = getattr(self.action_tokenizer, 'bos_id', self.vocab_size - 1)
@@ -230,7 +235,7 @@ class FDDRATPolicy(BasePolicy):
         tokens_generated = []
         threshold = 0.5
 
-        cond_input = z_v if z_v.dim() == 3 else z_v.unsqueeze(1)
+        cond_input = z_v.unsqueeze(1)  # [B, 1, D] for AR cross-attention
         for t in range(self.cfg.H_l):
             logits_step, hidden_states = self.ar_model(tokens_in, cond=cond_input)
 
