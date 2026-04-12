@@ -5,3 +5,4 @@ H_a: 16
 D_a: 256
 D_v: 768
 H_l: 64
+target_ratio: 0.5
