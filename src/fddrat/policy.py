@@ -79,9 +79,14 @@ class FDDRATPolicy(BasePolicy):
         shape_meta: OAT shape_meta dict; if None, obs_encoder is nn.Identity.
     """
 
+    # Required by LiberoRunner / BasePolicy interface
+    n_obs_steps: int = 2
+    n_action_steps: int = 32  # must match H_a
+
     def __init__(self, cfg: FDDRATConfig, shape_meta: dict = None):
         super().__init__()
         self.cfg = cfg
+        self.shape_meta = shape_meta  # stored for eval warm-up and get_observation_ports
 
         # Action tokenizer — real checkpoint or lightweight mock for dry-runs
         if cfg.tokenizer_ckpt:
@@ -225,6 +230,15 @@ class FDDRATPolicy(BasePolicy):
             {"params": base},
             {"params": router_crh, "weight_decay": 0.0, "lr": 1e-4},
         ]
+
+    def get_observation_ports(self) -> List[str]:
+        """Keys the LiberoRunner will pull from its obs_dict and pass to predict_action."""
+        if self.shape_meta is None:
+            return []
+        return list(self.shape_meta['obs'].keys())
+
+    def get_policy_name(self) -> str:
+        return "fddrat"
 
     def compile_decoder(self) -> None:
         """torch.compile the decoder and CRH for static CUDA-graph acceleration."""
