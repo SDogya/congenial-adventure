@@ -86,7 +86,7 @@ class FDDRATPolicy(BasePolicy):
             )
             # Реальная размерность через dummy forward — единственный надёжный способ,
             # т.к. output_feature_dim() не учитывает lazy-инициализацию ProjectionStateEncoder
-            obs_dim = self._infer_obs_dim(shape_meta)
+            obs_dim = cfg.D_v
         else:
             self.obs_encoder = nn.Identity()
             obs_dim = cfg.D_v

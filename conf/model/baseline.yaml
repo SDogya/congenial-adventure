@@ -2,7 +2,7 @@
 lambda_ratio: 1.0
 beta_mse: 1.0
 H_a: 16
-D_a: 7   # LIBERO action dimension (7-DOF); matches shape_meta action.shape[0]
-D_v: 768
+D_a: 7
+D_v: 250        # ← было 768, реальный obs_dim = 250
 H_l: 64
 target_ratio: 0.5
