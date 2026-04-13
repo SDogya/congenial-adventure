@@ -13,6 +13,7 @@ sys.path.insert(0, os.path.abspath('hnet'))
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning)
 
+import wandb
 import hydra
 from hydra.core.config_store import ConfigStore
 import pytorch_lightning as pl
@@ -25,6 +26,34 @@ from src.core.config_schema import ExperimentConfig
 from src.core.system import LitSystem
 from src.core.datamodule import LitDataModule
 from src.utils.setup import enforce_determinism
+
+class WandbCheckpointUploader(pl.Callback):
+    """Upload the best checkpoint to W&B as an artifact after each epoch.
+
+    Uploads only when rank 0 has an actual checkpoint file on disk.
+    Safe to use with DDP/FSDP — other ranks skip silently.
+    """
+
+    def on_train_epoch_end(self, trainer: pl.Trainer, pl_module: pl.LightningModule) -> None:
+        if trainer.global_rank != 0:
+            return
+        ckpt_cb = next(
+            (cb for cb in trainer.callbacks if isinstance(cb, ModelCheckpoint)),
+            None,
+        )
+        if ckpt_cb is None:
+            return
+        ckpt_path = ckpt_cb.best_model_path or ckpt_cb.last_model_path
+        if not ckpt_path or not os.path.exists(ckpt_path):
+            return
+        artifact = wandb.Artifact(
+            name=f"fddrat-epoch-{trainer.current_epoch:03d}",
+            type="model",
+            metadata={"epoch": trainer.current_epoch, "val_loss": trainer.callback_metrics.get("val_loss", -1)},
+        )
+        artifact.add_file(ckpt_path)
+        wandb.log_artifact(artifact)
+
 
 # Register the configuration schema
 cs = ConfigStore.instance()
@@ -64,7 +93,7 @@ def main(cfg: ExperimentConfig) -> None:
 
     trainer = pl.Trainer(
         logger=logger,
-        callbacks=[checkpoint_callback],
+        callbacks=[checkpoint_callback, WandbCheckpointUploader()],
         max_epochs=10,
         strategy=strategy,
         precision=cfg.strategy.mixed_precision,
