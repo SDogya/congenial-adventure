@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 from typing import Dict, Any, List
+
 from oat.model.common.normalizer import LinearNormalizer
 
 try:
@@ -20,7 +21,26 @@ from src.fddrat.tokenizer import FDDRATTok, DummyDecoder, DummyQuantizer, DummyN
 
 
 class ARModelWithHiddens(AutoregressiveModel):
-    def forward(self, tokens: torch.LongTensor, cond: torch.Tensor):
+    """AutoregressiveModel subclass that also returns hidden states.
+
+    The parent class only returns logits.  FD-DRAT needs the hidden states
+    to compute cosine-similarity routing signals between adjacent positions.
+    """
+
+    def forward(
+        self,
+        tokens: torch.LongTensor,
+        cond: torch.Tensor,
+    ):
+        """
+        Args:
+            tokens: Token sequence [B, T] (includes BOS at position 0).
+            cond:   Conditioning tensor [B, 1, cond_dim] from obs encoder.
+
+        Returns:
+            logits:        [B, T, vocab_size]
+            hidden_states: [B, T, n_emb]
+        """
         T_tok = tokens.shape[1]
         T_cond = cond.shape[1]
 
@@ -31,26 +51,39 @@ class ARModelWithHiddens(AutoregressiveModel):
         cond_emb = self.drop(cond_emb + self.cond_pos_emb[:, :T_cond, :].to(cond.device))
         cond_emb = self.encoder(cond_emb)
 
-        tgt_mask = (torch.triu(torch.ones(T_tok, T_tok, device=tokens.device)) == 1).transpose(0, 1)
-        tgt_mask = tgt_mask.float().masked_fill(tgt_mask == 0, float('-inf')).masked_fill(tgt_mask == 1, float(0.0))
+        tgt_mask = nn.Transformer.generate_square_subsequent_mask(T_tok, device=tokens.device)
 
-        out = self.decoder(
-            tgt=tok_emb,
-            memory=cond_emb,
-            tgt_mask=tgt_mask,
-            memory_mask=None,
-        )
+        out = self.decoder(tgt=tok_emb, memory=cond_emb, tgt_mask=tgt_mask, memory_mask=None)
         hidden_states = self.ln_f(out)
-        logits = self.head(hidden_states)
-        return logits, hidden_states
+        return self.head(hidden_states), hidden_states
 
 
 class FDDRATPolicy(BasePolicy):
+    """Feature-Decoupled Dynamic Routing Action Transformer policy.
+
+    Architecture (training forward pass):
+        1. Obs → FusedObservationEncoder → z_v [B, D_obs]
+        2. Action → FDDRATTok.encode → (latents [B, H_l, 4], tokens [B, H_l])
+        3. Nested Dropout: K ~ U[1, H_l]; mask latents beyond K
+        4. AR transformer: [BOS, tokens] + z_v → logits + hidden_states
+        5. Router (decoupled): cos-sim of adjacent hidden states → p_stop logits
+        6. CRH: stop_gradient(decode_coarse(latents_masked)) + z_v → delta_a
+        7. FDDRATLoss: L_CE + lambda*L_ratio + beta*L_mse(masked)
+
+    Inference (predict_action):
+        Autoregressive loop up to H_l steps with early exit when router fires.
+        Remaining latent slots zero-padded to prevent CRH hallucinations.
+
+    Args:
+        cfg:        FDDRATConfig with all hyperparameters.
+        shape_meta: OAT shape_meta dict; if None, obs_encoder is nn.Identity.
+    """
+
     def __init__(self, cfg: FDDRATConfig, shape_meta: dict = None):
         super().__init__()
         self.cfg = cfg
-        self.shape_meta = shape_meta
 
+        # Action tokenizer — real checkpoint or lightweight mock for dry-runs
         if cfg.tokenizer_ckpt:
             self.action_tokenizer = FDDRATTok._load_from_oat_ckpt(cfg.tokenizer_ckpt)
         else:
@@ -61,143 +94,152 @@ class FDDRATPolicy(BasePolicy):
             )
             self.action_tokenizer.normalizer = DummyNormalizer()
 
+        # nn.ModuleDict ensures action normalizer stats are serialised into checkpoints
         self.normalizer = nn.ModuleDict()
 
-        # 1. Observation encoder
+        # Observation encoder
         if shape_meta is not None:
             from oat.perception.fused_obs_encoder import FusedObservationEncoder
             from omegaconf import OmegaConf
-
-            vision_dict = {
-                "_target_": "oat.perception.robomimic_vision_encoder.RobomimicRgbEncoder",
-                "crop_shape": [76, 76]
-            }
-            state_dict = {
-                "_target_": "oat.perception.state_encoder.ProjectionStateEncoder",
-                "out_dim": None
-            }
-
             self.obs_encoder = FusedObservationEncoder(
                 shape_meta=shape_meta,
-                vision_encoder=OmegaConf.create(vision_dict),
-                state_encoder=OmegaConf.create(state_dict)
+                vision_encoder=OmegaConf.create({
+                    "_target_": "oat.perception.robomimic_vision_encoder.RobomimicRgbEncoder",
+                    "crop_shape": [76, 76],
+                }),
+                state_encoder=OmegaConf.create({
+                    "_target_": "oat.perception.state_encoder.ProjectionStateEncoder",
+                    "out_dim": None,
+                }),
             )
         else:
             self.obs_encoder = nn.Identity()
-        # Определяем реальный obs_dim через dummy forward
 
+        # Vocab size and latent embedding dim from quantizer
+        q = self.action_tokenizer.quantizer
+        self.vocab_size = q.codebook_size + 1  # +1 for BOS
+        self.embedding_dim = getattr(q, 'embedding_dim', q.dim)
 
-        # obs_dim = реальный выход энкодера (из конфига, т.к. ProjectionStateEncoder lazy)
-        # D_v = внутренняя размерность AR-трансформера (должна делиться на num_heads=12)
-        obs_dim = cfg.obs_dim  # берём из конфига
-        ar_dim = cfg.D_v      # 768 — внутренний dim AR (768 / 12 = 64 ✓)
-
-        # 2. Vocab size
-        if hasattr(self.action_tokenizer, 'quantizer'):
-            self.vocab_size = self.action_tokenizer.quantizer.codebook_size + 1
-            self.embedding_dim = getattr(
-                self.action_tokenizer.quantizer,
-                'embedding_dim',
-                self.action_tokenizer.quantizer.dim,
-            )
-        else:
-            self.vocab_size = 1001
-            self.embedding_dim = 4
-
-        # 3. AR Model: cond_dim=obs_dim (вход с энкодера), n_emb=ar_dim (внутренний)
+        # AR model: obs features project into AR internal dim (D_v) via cond_emb
         self.ar_model = ARModelWithHiddens(
             vocab_size=self.vocab_size,
-            max_seq_len=cfg.H_l + 1,
+            max_seq_len=cfg.H_l + 1,  # +1 for BOS
             max_cond_len=1,
-            cond_dim=obs_dim,
-            n_emb=ar_dim
+            cond_dim=cfg.obs_dim,
+            n_emb=cfg.D_v,
         )
-        # print(f"[Debug] вот значение Oobs dim перед спавно srh {obs_dim}")
-        # 4. CRH и Router — принимают реальный obs_dim, не ar_dim
-        self.crh = ContinuousResidualHead(H_a=cfg.H_a, D_a=cfg.D_a, D_v=obs_dim)
-        self.router = ShadowRouter(D_v=obs_dim)
-        
+
+        # CRH and Router operate on the raw obs dim, not the AR internal dim
+        self.crh = ContinuousResidualHead(H_a=cfg.H_a, D_a=cfg.D_a, D_v=cfg.obs_dim)
+        self.router = ShadowRouter(D_v=cfg.obs_dim)
         self.loss_fn = FDDRATLoss(lambda_ratio=cfg.lambda_ratio, beta_mse=cfg.beta_mse)
         self.dropout = MaskedNestedDropout(dim=self.embedding_dim)
 
     def set_normalizer(self, normalizer: LinearNormalizer) -> None:
+        """Inject dataset normalizer (called by LitSystem.setup after datamodule is ready).
+
+        Registers the action normalizer as a submodule so its scale/offset
+        tensors are included in the checkpoint state_dict.
+        """
         if hasattr(self.obs_encoder, 'set_normalizer'):
             self.obs_encoder.set_normalizer(normalizer)
         self.normalizer.update({'action': normalizer['action']})
 
     def forward(self, batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+        """Training forward pass computing the composite FD-DRAT loss.
+
+        Args:
+            batch: Dict with keys 'obs' and 'action'.
+                   'obs'    — observation dict fed to FusedObservationEncoder.
+                   'action' — ground-truth actions [B, H_a, D_a].
+
+        Returns:
+            {'loss': scalar tensor}
+        """
+        # 1. Observation encoding → z_v [B, D_obs]
         z_v = self.obs_encoder(batch['obs'])
-        # print(f"[DEBUG] obs_encoder output shape: {z_v.shape}")
         if z_v.dim() == 3:
-            z_v = z_v.squeeze(1)
+            z_v = z_v.squeeze(1)  # FusedObsEncoder returns [B, To=1, D] → [B, D]
         B = z_v.size(0)
-        # print(f"[DEBUG] z_v after squeeze: {z_v.shape}")
+
+        # 2. Tokenization: action → latents [B, H_l, 4] + tokens [B, H_l]
         latents, tokens = self.action_tokenizer.encode(batch['action'])
         if tokens.dim() == 3 and tokens.shape[-1] == 1:
-            tokens = tokens.squeeze(-1)
+            tokens = tokens.squeeze(-1)  # normalise to [B, H_l] for both real FSQ and mock
 
+        # 3. Nested Dropout: sample K ~ U[1, H_l] per item, mask latents beyond K
         K_sampled = torch.randint(1, self.cfg.H_l + 1, (B,), device=z_v.device)
         self.dropout.eval()
         latents_masked = self.dropout(latents.clone(), eval_keep_k=K_sampled.tolist())
         self.dropout.train()
 
-        tokens_masked = tokens.clone()
-
+        # 4. Autoregressive forward: [BOS, token_0..H_l-1] → logits + hidden states
         bos_id = getattr(self.action_tokenizer, 'bos_id', self.vocab_size - 1)
-        bos_tokens = torch.full((B, 1), bos_id, device=tokens_masked.device, dtype=torch.long)
-        tokens_ar = torch.cat([bos_tokens, tokens_masked], dim=1)
+        bos_tokens = torch.full((B, 1), bos_id, device=tokens.device, dtype=torch.long)
+        tokens_ar = torch.cat([bos_tokens, tokens], dim=1)  # [B, H_l+1]
+        logits, hidden_states = self.ar_model(tokens_ar, cond=z_v.unsqueeze(1))
 
-        cond_input = z_v.unsqueeze(1)
-        # print(f"[DEBUG] cond_input: {cond_input.shape}")
-        logits, hidden_states = self.ar_model(tokens_ar, cond=cond_input)
-
-        # Decoupled Training: detach hidden states so router BCE loss
-        # cannot backprop into the AR backbone (hypothesis requirement)
-        q_t = hidden_states[:, 1:, :].detach()
-        k_prev = hidden_states[:, :-1, :].detach()
+        # 5. Decoupled routing — detach to prevent BCE loss from entering AR backbone
+        q_t = hidden_states[:, 1:, :].detach()    # hidden after each token [B, H_l, D]
+        k_prev = hidden_states[:, :-1, :].detach() # hidden before each token [B, H_l, D]
         p_stop_logits = self.router(q_t, k_prev, z_v.detach())
 
+        # 6. CRH: stop_gradient(coarse trajectory) + z_v → residual delta_a
         a_coarse_norm = self.action_tokenizer.decode_coarse(latents_masked)
-        # print(f"[DEBUG] a_coarse_norm shape: {a_coarse_norm.shape}")
-        a_coarse_norm_detached = a_coarse_norm.detach()
+        a_coarse_detached = a_coarse_norm.detach()
+        delta_a_norm = self.crh(a_coarse_detached, z_v)
 
-        delta_a_norm = self.crh(a_coarse_norm_detached, z_v)
-
+        # 7. Residual target in normalised space
         a_target_norm = batch['action']
-        if len(self.normalizer) > 0:
+        if self.normalizer:
             a_target_norm = self.normalizer['action'].normalize(a_target_norm)
+        residual_target = a_target_norm - a_coarse_detached
 
-        residual_target = a_target_norm - a_coarse_norm_detached
-        targets = tokens_masked
-        target_ratio = getattr(self.cfg, 'target_ratio', 0.5)
-        tau_target = torch.full_like(p_stop_logits, target_ratio)
-
+        tau_target = torch.full_like(p_stop_logits, self.cfg.target_ratio)
         loss = self.loss_fn(
             logits=logits,
-            targets=targets,
+            targets=tokens,
             p_stop_logits=p_stop_logits,
             tau_target=tau_target,
             delta_a=delta_a_norm,
             residual_target=residual_target,
             K_sampled=K_sampled,
-            H_l=self.cfg.H_l
+            H_l=self.cfg.H_l,
         )
         return {"loss": loss}
 
     def get_optimizer_params(self) -> List[Dict[str, Any]]:
-        router_crh_params = list(self.router.parameters()) + list(self.crh.parameters())
-        base_params = [p for n, p in self.named_parameters() if 'router' not in n and 'crh' not in n]
+        """Return parameter groups for AdamW.
+
+        Router and CRH use lr=1e-4 with no weight decay (small heads, fast
+        convergence needed).  All other parameters use the global lr and WD.
+        """
+        router_crh = list(self.router.parameters()) + list(self.crh.parameters())
+        base = [p for n, p in self.named_parameters() if 'router' not in n and 'crh' not in n]
         return [
-            {"params": base_params},
-            {"params": router_crh_params, "weight_decay": 0.0, "lr": 1e-4}
+            {"params": base},
+            {"params": router_crh, "weight_decay": 0.0, "lr": 1e-4},
         ]
 
-    def compile_decoder(self):
+    def compile_decoder(self) -> None:
+        """torch.compile the decoder and CRH for static CUDA-graph acceleration."""
         self.action_tokenizer.decoder = torch.compile(self.action_tokenizer.decoder)
         self.crh = torch.compile(self.crh)
 
     @torch.inference_mode()
-    def predict_action(self, obs: torch.Tensor) -> torch.Tensor:
+    def predict_action(self, obs: torch.Tensor) -> Dict[str, torch.Tensor]:
+        """Any-Time Routing inference: generate up to H_l tokens with early exit.
+
+        Stops early when the router fires (sigmoid > 0.5 for all items in batch).
+        Remaining latent slots are zero-padded (non-zero padding causes CRH
+        hallucinations — the static MLP has no mechanism to ignore stale input).
+
+        Args:
+            obs: Observation tensor fed directly to obs_encoder [B, ...].
+
+        Returns:
+            {'action': a_final [B, H_a, D_a]} in unnormalised action space.
+        """
         B = obs.size(0)
         z_v = self.obs_encoder(obs)
         if z_v.dim() == 3:
@@ -205,58 +247,57 @@ class FDDRATPolicy(BasePolicy):
 
         bos_id = getattr(self.action_tokenizer, 'bos_id', self.vocab_size - 1)
         tokens_in = torch.full((B, 1), bos_id, device=obs.device, dtype=torch.long)
+        cond_input = z_v.unsqueeze(1)
 
+        # BOS latent slot
         latents = torch.zeros(B, 1, self.embedding_dim, device=obs.device)
         if hasattr(self.action_tokenizer, 'bos_id_emb'):
             latents = self.action_tokenizer.bos_id_emb.expand(B, 1, -1)
 
         tokens_generated = []
-        threshold = 0.5
-
-        cond_input = z_v.unsqueeze(1)
         for t in range(self.cfg.H_l):
             logits_step, hidden_states = self.ar_model(tokens_in, cond=cond_input)
 
-            next_token = torch.argmax(logits_step[:, -1, :], dim=-1)
+            next_token = torch.argmax(logits_step[:, -1, :], dim=-1)  # [B]
             tokens_generated.append(next_token)
             tokens_in = torch.cat([tokens_in, next_token.unsqueeze(1)], dim=1)
 
+            # Convert token index to latent embedding for decoder input
             if hasattr(self.action_tokenizer, 'quantizer'):
-                next_latent = self.action_tokenizer.quantizer.indices_to_embedding(next_token.unsqueeze(-1))
+                next_latent = self.action_tokenizer.quantizer.indices_to_embedding(
+                    next_token.unsqueeze(-1)
+                )
             else:
                 next_latent = torch.zeros(B, 1, self.embedding_dim, device=obs.device)
-
             latents = torch.cat([latents, next_latent], dim=1)
 
+            # Early exit check (skip t=0 — only BOS in context, signal not meaningful)
             if t > 0:
                 q_t = hidden_states[:, -1:, :]
                 k_prev = hidden_states[:, -2:-1, :]
-                p_stop_logit = self.router(q_t, k_prev, z_v)
-                p_stop_prob = torch.sigmoid(p_stop_logit)
-                if (p_stop_prob > threshold).all():
+                if (torch.sigmoid(self.router(q_t, k_prev, z_v)) > 0.5).all():
                     break
 
-        curr_len = len(tokens_generated)
-        if curr_len < self.cfg.H_l:
-            pad_size = self.cfg.H_l - curr_len
-            padded_latents = torch.zeros(
-                B, pad_size, self.embedding_dim,
-                device=obs.device, dtype=latents.dtype
-            )
-            latents = torch.cat([latents, padded_latents], dim=1)
+        # Zero-pad latents if stopped early (non-zero padding → CRH hallucinations)
+        pad_size = self.cfg.H_l - len(tokens_generated)
+        if pad_size > 0:
+            latents = torch.cat([
+                latents,
+                torch.zeros(B, pad_size, self.embedding_dim, device=obs.device, dtype=latents.dtype),
+            ], dim=1)
 
+        # Strip BOS slot, decode, refine
         latents_filtered = latents[:, 1:, :]
-
         a_coarse_norm = self.action_tokenizer.decode_coarse(latents_filtered)
-        delta_a_norm = self.crh(a_coarse_norm, z_v)
-        a_final_norm = a_coarse_norm + delta_a_norm
+        a_final_norm = a_coarse_norm + self.crh(a_coarse_norm, z_v)
 
-        if len(self.normalizer) > 0:
+        # Denormalise — policy normalizer takes priority over tokenizer's
+        if self.normalizer:
             a_final = self.normalizer['action'].unnormalize(a_final_norm)
-        elif hasattr(self.action_tokenizer, 'normalizer') and 'action' in self.action_tokenizer.normalizer:
+        elif hasattr(self.action_tokenizer, 'normalizer') and \
+                'action' in self.action_tokenizer.normalizer:
             a_final = self.action_tokenizer.normalizer['action'].unnormalize(a_final_norm)
         else:
             a_final = a_final_norm
 
-        n_slice = getattr(self.cfg, 'n_action_steps', getattr(self.cfg, 'H_a', 16))
-        return {"action": a_final[:, :n_slice]}
+        return {"action": a_final[:, :self.cfg.H_a]}
