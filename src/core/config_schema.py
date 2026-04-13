@@ -14,7 +14,7 @@ class FDDRATConfig:
     target_ratio: float = 0.5
     H_a: int = 16
     D_a: int = 7
-    obs_dim: int = 138    # ← было 250; реальный выход FusedObsEncode
+    obs_dim: int = 250    # ← было 250; реальный выход FusedObsEncode
     D_v: int = 768
     H_l: int = 64
     tokenizer_ckpt: Optional[str] = None
