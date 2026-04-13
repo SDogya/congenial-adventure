@@ -2,7 +2,7 @@ lambda_ratio: 1.0
 beta_mse: 1.0
 H_a: 16
 D_a: 7
-obs_dim: 250    # ← было 250
+obs_dim: 138    # ← было 250
 D_v: 768
 H_l: 64
 target_ratio: 0.5

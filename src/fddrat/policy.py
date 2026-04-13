@@ -85,24 +85,12 @@ class FDDRATPolicy(BasePolicy):
         else:
             self.obs_encoder = nn.Identity()
         # Определяем реальный obs_dim через dummy forward
-        if shape_meta is not None:
-            dummy_obs = {}
-            for key, spec in shape_meta['obs'].items():
-                shape = spec['shape']
-                dummy_obs[key] = torch.zeros(1, 1, *shape)
-            with torch.no_grad():
-                _out = self.obs_encoder(dummy_obs)
-                if _out.dim() == 3:
-                    _out = _out.squeeze(1)
-            obs_dim = 250
-            print(f"[FDDRATPolicy] real obs_dim = {obs_dim}")
-        else:
-            obs_dim = 250
+
 
         # obs_dim = реальный выход энкодера (из конфига, т.к. ProjectionStateEncoder lazy)
         # D_v = внутренняя размерность AR-трансформера (должна делиться на num_heads=12)
-        obs_dim = 250  # 250 — реальный выход FusedObsEncoder
-        ar_dim = cfg.D_v        # 768 — внутренний dim AR (768 / 12 = 64 ✓)
+        obs_dim = cfg.obs_dim  # берём из конфига
+        ar_dim = cfg.D_v      # 768 — внутренний dim AR (768 / 12 = 64 ✓)
 
         # 2. Vocab size
         if hasattr(self.action_tokenizer, 'quantizer'):
@@ -128,10 +116,7 @@ class FDDRATPolicy(BasePolicy):
         # 4. CRH и Router — принимают реальный obs_dim, не ar_dim
         self.crh = ContinuousResidualHead(H_a=cfg.H_a, D_a=cfg.D_a, D_v=obs_dim)
         self.router = ShadowRouter(D_v=obs_dim)
-        with torch.no_grad():
-            _dummy_a = torch.zeros(1, cfg.H_a, cfg.D_a)
-            _dummy_z = torch.zeros(1, obs_dim)
-            self.crh(_dummy_a, _dummy_z)
+        
         self.loss_fn = FDDRATLoss(lambda_ratio=cfg.lambda_ratio, beta_mse=cfg.beta_mse)
         self.dropout = MaskedNestedDropout(dim=self.embedding_dim)
 
