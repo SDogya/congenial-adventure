@@ -1,78 +1,3 @@
-# ── 1. Repos & deps ──────────────────────────────────────────────────────────
-!git clone https://github.com/goombalab/hnet.git
-!git clone --recurse-submodules https://github.com/Chaoqi-LIU/oat.git
-!rm -rf congenial-adventure && git clone https://github.com/SDogya/congenial-adventure.git && cp -r congenial-adventure/. . && rm -rf congenial-adventure
-
-import os
-from kaggle_secrets import UserSecretsClient
-os.environ['WANDB_API_KEY'] = UserSecretsClient().get_secret('wandb')
-
-!uv add "zarr<3.0.0" dill einops numba vector-quantize-pytorch accelerate huggingface_hub "robomimic<0.3.0" torchvision wrapt pillow pandas diffusers
-!uv sync
-
-# Patch OAT's lr_scheduler.py: newer diffusers removed Union/Optional/Optimizer exports
-p = 'oat/oat/model/common/lr_scheduler.py'
-txt = open(p).read()
-marker = 'from diffusers.optimization import ('
-if marker in txt and 'from typing import Union' not in txt:
-    idx = txt.index(marker)
-    end_idx = txt.index(')', idx) + 1
-    header = (
-        'from typing import Union, Optional\n'
-        'from torch.optim import Optimizer\n'
-        'from diffusers.optimization import SchedulerType, TYPE_TO_SCHEDULER_FUNCTION'
-    )
-    open(p, 'w').write(txt[:idx] + header + txt[end_idx:])
-    print('lr_scheduler.py patched OK')
-else:
-    print('lr_scheduler.py already clean, skipping')
-
-
-
-!rm -rf congenial-adventure && git clone https://github.com/SDogya/congenial-adventure.git && cp -r congenial-adventure/. . && rm -rf congenial-adventure
-
-# ── 2. Dataset (скачиваем прямо туда, куда смотрит OAT по дефолту) ───────────
-import os
-from huggingface_hub import snapshot_download
-from huggingface_hub import login
-hf_token = UserSecretsClient().get_secret('hugface')
-
-if hf_token:
-    login(token=hf_token)
-else:
-    print("Ошибка: Секрет 'hugface' не найден.")
-
-
-os.makedirs('/kaggle/working/oat/data/libero', exist_ok=True)
-snapshot_download(
-    repo_id='chaoqi-liu/libero10_N500.zarr',
-    repo_type='dataset',
-    local_dir='/kaggle/working/oat/data/libero'
-)
-
-
-
-# Распаковываем архив прямо в ту же папку
-!unzip -o -q /kaggle/working/oat/data/libero/libero10_N500.zarr.zip -d /kaggle/working/oat/data/libero/
-
-# Проверяем, что папка появилась
-!ls -ld /kaggle/working/oat/data/libero/*
-# ── 3. Train OAT tokenizer (~2-3h, 300 epochs) ───────────────────────────────
-!uv run python oat/scripts/run_workspace.py \
-    --config-name=train_oattok \
-    task/tokenizer=libero/libero10 \
-    training.num_epochs=300 \
-    logging.project=VLA-experiment \
-    task.tokenizer.dataset.zarr_path="/kaggle/working/oat/data/libero/libero10_N500.zarr"
-# ── 4. Train FD-DRAT ─────────────────────────────────────────────────────────
-!TOK=$(find /kaggle/working/output /kaggle/working/oat/output -name '*.ckpt' 2>/dev/null | sort | tail -1) && \
- HYDRA_FULL_ERROR=1 MPLBACKEND=agg uv run run.py \
-    strategy=single_gpu \
-    model.tokenizer_ckpt=$TOK \
-    dataset_path=/kaggle/working/oat/data/libero/libero10_N500.zarr \
-    batch_size=16
-
-
 Seed set to 42
 /kaggle/working/.venv/lib/python3.12/site-packages/torchvision/models/_utils.py:208: UserWarning: The parameter 'pretrained' is deprecated since 0.13 and may be removed in the future, please use 'weights' instead.
   warnings.warn(
@@ -90,8 +15,8 @@ Initializing distributed: GLOBAL_RANK: 0, MEMBER: 1/2
 /kaggle/working/.venv/lib/python3.12/site-packages/torchvision/models/_utils.py:223: UserWarning: Arguments other than a weight enum or `None` for 'weights' are deprecated since 0.13 and may be removed in the future. The current behavior is equivalent to passing `weights=None`.
   warnings.warn(msg)
 Initializing distributed: GLOBAL_RANK: 1, MEMBER: 2/2
-[W412 23:54:04.060794819 Utils.hpp:137] Warning: Environment variable NCCL_ASYNC_ERROR_HANDLING is deprecated; use TORCH_NCCL_ASYNC_ERROR_HANDLING instead (function operator())
-[W412 23:54:04.070974287 Utils.hpp:137] Warning: Environment variable NCCL_ASYNC_ERROR_HANDLING is deprecated; use TORCH_NCCL_ASYNC_ERROR_HANDLING instead (function operator())
+[W412 23:58:20.684270832 Utils.hpp:137] Warning: Environment variable NCCL_ASYNC_ERROR_HANDLING is deprecated; use TORCH_NCCL_ASYNC_ERROR_HANDLING instead (function operator())
+[W412 23:58:20.688439026 Utils.hpp:137] Warning: Environment variable NCCL_ASYNC_ERROR_HANDLING is deprecated; use TORCH_NCCL_ASYNC_ERROR_HANDLING instead (function operator())
 ----------------------------------------------------------------------------------------------------
 distributed_backend=nccl
 All distributed processes registered. Starting with 2 processes
@@ -102,18 +27,16 @@ wandb: [wandb.login()] Loaded credentials for https://api.wandb.ai from WANDB_AP
 wandb: Currently logged in as: sebersehmer (sebersehmer-nopeinc) to https://api.wandb.ai. Use `wandb login --relogin` to force relogin
 ]11;?]11;?wandb: ⢿ Waiting for wandb.init()...
 wandb: ⣻ Waiting for wandb.init()...
-wandb: ⣽ Waiting for wandb.init()...
-wandb: ⣾ setting up run x9z1se1x (0.4s)
 wandb: Tracking run with wandb version 0.25.1
-wandb: Run data is saved locally in wandb/run-20260412_235406-x9z1se1x
+wandb: Run data is saved locally in wandb/run-20260412_235821-ek1u14vw
 wandb: Run `wandb offline` to turn off syncing.
-wandb: Syncing run absurd-snowflake-7
+wandb: Syncing run fragrant-fire-8
 wandb: ⭐️ View project at https://wandb.ai/sebersehmer-nopeinc/VLA-experiment
-wandb: 🚀 View run at https://wandb.ai/sebersehmer-nopeinc/VLA-experiment/runs/x9z1se1x
+wandb: 🚀 View run at https://wandb.ai/sebersehmer-nopeinc/VLA-experiment/runs/ek1u14vw
 LOCAL_RANK: 1 - CUDA_VISIBLE_DEVICES: [0,1]
 LOCAL_RANK: 0 - CUDA_VISIBLE_DEVICES: [0,1]
-[rank0]:[W412 23:54:11.954340810 Utils.hpp:112] Warning: Environment variable NCCL_ASYNC_ERROR_HANDLING is deprecated; use TORCH_NCCL_ASYNC_ERROR_HANDLING instead (function operator())
-[rank1]:[W412 23:54:11.954612755 Utils.hpp:112] Warning: Environment variable NCCL_ASYNC_ERROR_HANDLING is deprecated; use TORCH_NCCL_ASYNC_ERROR_HANDLING instead (function operator())
+[rank0]:[W412 23:58:27.412059589 Utils.hpp:112] Warning: Environment variable NCCL_ASYNC_ERROR_HANDLING is deprecated; use TORCH_NCCL_ASYNC_ERROR_HANDLING instead (function operator())
+[rank1]:[W412 23:58:27.413405416 Utils.hpp:112] Warning: Environment variable NCCL_ASYNC_ERROR_HANDLING is deprecated; use TORCH_NCCL_ASYNC_ERROR_HANDLING instead (function operator())
 /kaggle/working/.venv/lib/python3.12/site-packages/pytorch_lightning/utilities/model_summary/model_summary.py:242: Precision bf16-mixed is not supported by the model summary.  Estimated model size in MB will not be accurate. Using 32 bits instead.
 ┏━━━┳━━━━━━━┳━━━━━━━━━━━━━━┳━━━━━━━━┳━━━━━━━┳━━━━━━━┓
 ┃   ┃ Name  ┃ Type         ┃ Params ┃ Mode  ┃ FLOPs ┃
@@ -227,7 +150,7 @@ Error executing job with overrides: ['strategy=single_gpu', 'model.tokenizer_ckp
 [rank1]:   File "/kaggle/working/.venv/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1790, in _call_impl
 [rank1]:     return forward_call(*args, **kwargs)
 [rank1]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-[rank1]:   File "/kaggle/working/src/fddrat/policy.py", line 176, in forward
+[rank1]:   File "/kaggle/working/src/fddrat/policy.py", line 179, in forward
 [rank1]:     delta_a_norm = self.crh(a_coarse_norm_detached, z_v)
 [rank1]:                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 [rank1]:   File "/kaggle/working/.venv/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1779, in _wrapped_call_impl
@@ -236,10 +159,28 @@ Error executing job with overrides: ['strategy=single_gpu', 'model.tokenizer_ckp
 [rank1]:   File "/kaggle/working/.venv/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1790, in _call_impl
 [rank1]:     return forward_call(*args, **kwargs)
 [rank1]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-[rank1]:   File "/kaggle/working/src/fddrat/modules/crh.py", line 45, in forward
-[rank1]:     x = torch.cat([a_coarse_flat, z_v], dim=1)  # [B, (H_a*D_a) + D_v]
-[rank1]:         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-[rank1]: RuntimeError: Tensors must have same number of dimensions: got 2 and 3
+[rank1]:   File "/kaggle/working/src/fddrat/modules/crh.py", line 48, in forward
+[rank1]:     delta_a_flat = self.mlp(x)  # [B, H_a * D_a]
+[rank1]:                    ^^^^^^^^^^^
+[rank1]:   File "/kaggle/working/.venv/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1779, in _wrapped_call_impl
+[rank1]:     return self._call_impl(*args, **kwargs)
+[rank1]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank1]:   File "/kaggle/working/.venv/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1790, in _call_impl
+[rank1]:     return forward_call(*args, **kwargs)
+[rank1]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank1]:   File "/kaggle/working/.venv/lib/python3.12/site-packages/torch/nn/modules/container.py", line 253, in forward
+[rank1]:     input = module(input)
+[rank1]:             ^^^^^^^^^^^^^
+[rank1]:   File "/kaggle/working/.venv/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1779, in _wrapped_call_impl
+[rank1]:     return self._call_impl(*args, **kwargs)
+[rank1]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank1]:   File "/kaggle/working/.venv/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1790, in _call_impl
+[rank1]:     return forward_call(*args, **kwargs)
+[rank1]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank1]:   File "/kaggle/working/.venv/lib/python3.12/site-packages/torch/nn/modules/linear.py", line 134, in forward
+[rank1]:     return F.linear(input, self.weight, self.bias)
+[rank1]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank1]: RuntimeError: mat1 and mat2 shapes cannot be multiplied (16x362 and 250x375)
 Error executing job with overrides: ['strategy=single_gpu', 'model.tokenizer_ckpt=/kaggle/working/oat/output/20260412/225721_train_oattok_libero10_N500/checkpoints/latest.ckpt', 'dataset_path=/kaggle/working/oat/data/libero/libero10_N500.zarr', 'batch_size=16']
 Traceback (most recent call last):
   File "/kaggle/working/run.py", line 74, in <module>
@@ -332,7 +273,7 @@ Traceback (most recent call last):
   File "/kaggle/working/.venv/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1790, in _call_impl
     return forward_call(*args, **kwargs)
            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/kaggle/working/src/fddrat/policy.py", line 176, in forward
+  File "/kaggle/working/src/fddrat/policy.py", line 179, in forward
     delta_a_norm = self.crh(a_coarse_norm_detached, z_v)
                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
   File "/kaggle/working/.venv/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1779, in _wrapped_call_impl
@@ -341,10 +282,28 @@ Traceback (most recent call last):
   File "/kaggle/working/.venv/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1790, in _call_impl
     return forward_call(*args, **kwargs)
            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/kaggle/working/src/fddrat/modules/crh.py", line 45, in forward
-    x = torch.cat([a_coarse_flat, z_v], dim=1)  # [B, (H_a*D_a) + D_v]
-        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-RuntimeError: Tensors must have same number of dimensions: got 2 and 3
+  File "/kaggle/working/src/fddrat/modules/crh.py", line 48, in forward
+    delta_a_flat = self.mlp(x)  # [B, H_a * D_a]
+                   ^^^^^^^^^^^
+  File "/kaggle/working/.venv/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1779, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/kaggle/working/.venv/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1790, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/kaggle/working/.venv/lib/python3.12/site-packages/torch/nn/modules/container.py", line 253, in forward
+    input = module(input)
+            ^^^^^^^^^^^^^
+  File "/kaggle/working/.venv/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1779, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/kaggle/working/.venv/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1790, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/kaggle/working/.venv/lib/python3.12/site-packages/torch/nn/modules/linear.py", line 134, in forward
+    return F.linear(input, self.weight, self.bias)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+RuntimeError: mat1 and mat2 shapes cannot be multiplied (16x362 and 250x375)
 [rank0]: Traceback (most recent call last):
 [rank0]:   File "/kaggle/working/run.py", line 74, in <module>
 [rank0]:     main()
@@ -436,7 +395,7 @@ RuntimeError: Tensors must have same number of dimensions: got 2 and 3
 [rank0]:   File "/kaggle/working/.venv/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1790, in _call_impl
 [rank0]:     return forward_call(*args, **kwargs)
 [rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-[rank0]:   File "/kaggle/working/src/fddrat/policy.py", line 176, in forward
+[rank0]:   File "/kaggle/working/src/fddrat/policy.py", line 179, in forward
 [rank0]:     delta_a_norm = self.crh(a_coarse_norm_detached, z_v)
 [rank0]:                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 [rank0]:   File "/kaggle/working/.venv/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1779, in _wrapped_call_impl
@@ -445,9 +404,27 @@ RuntimeError: Tensors must have same number of dimensions: got 2 and 3
 [rank0]:   File "/kaggle/working/.venv/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1790, in _call_impl
 [rank0]:     return forward_call(*args, **kwargs)
 [rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-[rank0]:   File "/kaggle/working/src/fddrat/modules/crh.py", line 45, in forward
-[rank0]:     x = torch.cat([a_coarse_flat, z_v], dim=1)  # [B, (H_a*D_a) + D_v]
-[rank0]:         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-[rank0]: RuntimeError: Tensors must have same number of dimensions: got 2 and 3
+[rank0]:   File "/kaggle/working/src/fddrat/modules/crh.py", line 48, in forward
+[rank0]:     delta_a_flat = self.mlp(x)  # [B, H_a * D_a]
+[rank0]:                    ^^^^^^^^^^^
+[rank0]:   File "/kaggle/working/.venv/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1779, in _wrapped_call_impl
+[rank0]:     return self._call_impl(*args, **kwargs)
+[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/kaggle/working/.venv/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1790, in _call_impl
+[rank0]:     return forward_call(*args, **kwargs)
+[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/kaggle/working/.venv/lib/python3.12/site-packages/torch/nn/modules/container.py", line 253, in forward
+[rank0]:     input = module(input)
+[rank0]:             ^^^^^^^^^^^^^
+[rank0]:   File "/kaggle/working/.venv/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1779, in _wrapped_call_impl
+[rank0]:     return self._call_impl(*args, **kwargs)
+[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/kaggle/working/.venv/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1790, in _call_impl
+[rank0]:     return forward_call(*args, **kwargs)
+[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/kaggle/working/.venv/lib/python3.12/site-packages/torch/nn/modules/linear.py", line 134, in forward
+[rank0]:     return F.linear(input, self.weight, self.bias)
+[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]: RuntimeError: mat1 and mat2 shapes cannot be multiplied (16x362 and 250x375)
 wandb: 
-wandb: 🚀 View run absurd-snowflake-7 at: https://wandb.ai/sebersehmer-nopeinc/VLA-experiment/runs/x9z1se1x
+wandb: 🚀 View run fragrant-fire-8 at: https://wandb.ai/sebersehmer-nopeinc/VLA-experiment/runs/ek1u14vw
