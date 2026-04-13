@@ -3,6 +3,6 @@ lambda_ratio: 1.0
 beta_mse: 1.0
 H_a: 16
 D_a: 7
-D_v: 250        # ← было 768, реальный obs_dim = 250
+D_v: 256        # ← было 250; AR transformer n_emb, должно делиться на num_heads=8
 H_l: 64
 target_ratio: 0.5
