@@ -259,17 +259,23 @@ class FDDRATPolicy(BasePolicy):
         Returns:
             {'action': a_final [B, H_a, D_a]} in unnormalised action space.
         """
-        B = obs.size(0)
+        # LiberoRunner passes a dict {port: tensor}; handle both dict and bare tensor
+        if isinstance(obs, dict):
+            _first = next(iter(obs.values()))
+            B, device = _first.shape[0], _first.device
+        else:
+            B, device = obs.size(0), obs.device
+
         z_v = self.obs_encoder(obs)
         if z_v.dim() == 3:
             z_v = z_v[:, -1, :]  # take last obs step; robust to To>1
 
         bos_id = getattr(self.action_tokenizer, 'bos_id', self.vocab_size - 1)
-        tokens_in = torch.full((B, 1), bos_id, device=obs.device, dtype=torch.long)
+        tokens_in = torch.full((B, 1), bos_id, device=device, dtype=torch.long)
         cond_input = z_v.unsqueeze(1)
 
         # BOS latent slot
-        latents = torch.zeros(B, 1, self.embedding_dim, device=obs.device)
+        latents = torch.zeros(B, 1, self.embedding_dim, device=device)
         if hasattr(self.action_tokenizer, 'bos_id_emb'):
             latents = self.action_tokenizer.bos_id_emb.expand(B, 1, -1)
 
@@ -290,7 +296,7 @@ class FDDRATPolicy(BasePolicy):
                     next_token.unsqueeze(-1)
                 )
             else:
-                next_latent = torch.zeros(B, 1, self.embedding_dim, device=obs.device)
+                next_latent = torch.zeros(B, 1, self.embedding_dim, device=device)
             latents = torch.cat([latents, next_latent], dim=1)
 
             # Early exit check (skip t=0 — only BOS in context, signal not meaningful)
@@ -305,7 +311,7 @@ class FDDRATPolicy(BasePolicy):
         if pad_size > 0:
             latents = torch.cat([
                 latents,
-                torch.zeros(B, pad_size, self.embedding_dim, device=obs.device, dtype=latents.dtype),
+                torch.zeros(B, pad_size, self.embedding_dim, device=device, dtype=latents.dtype),
             ], dim=1)
 
         # Strip BOS slot, decode, refine
