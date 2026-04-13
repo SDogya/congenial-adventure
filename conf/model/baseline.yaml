@@ -1,6 +1,6 @@
 lambda_ratio: 1.0
 beta_mse: 1.0
-H_a: 16
+H_a: 32
 D_a: 7
 obs_dim: 138    # ← было 250
 D_v: 768

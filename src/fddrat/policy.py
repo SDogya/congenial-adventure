@@ -112,7 +112,7 @@ class FDDRATPolicy(BasePolicy):
             cond_dim=obs_dim,
             n_emb=ar_dim
         )
-
+        print(f"[Debug] вот значение Oobs dim перед спавно srh {obs_dim}")
         # 4. CRH и Router — принимают реальный obs_dim, не ar_dim
         self.crh = ContinuousResidualHead(H_a=cfg.H_a, D_a=cfg.D_a, D_v=obs_dim)
         self.router = ShadowRouter(D_v=obs_dim)
