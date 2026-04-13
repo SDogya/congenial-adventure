@@ -36,12 +36,6 @@ class LitSystem(pl.LightningModule):
         loss = self.model(batch)["loss"]
         self.log("train_loss", loss, batch_size=batch['action'].size(0),
                  on_step=True, on_epoch=True, prog_bar=True, sync_dist=True)
-        if batch_idx % 50 == 0:
-            try:
-                from IPython.display import clear_output
-                clear_output(wait=True)
-            except Exception:
-                pass
         return {"loss": loss}
 
     def validation_step(self, batch: Any, batch_idx: int) -> Dict[str, torch.Tensor]:

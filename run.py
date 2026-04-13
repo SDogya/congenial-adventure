@@ -70,7 +70,9 @@ def main(cfg: ExperimentConfig) -> None:
         precision=cfg.strategy.mixed_precision,
         sync_batchnorm=cfg.strategy.use_fsdp,
         accelerator="auto",
-        devices="auto"
+        devices="auto",
+        enable_progress_bar=False,  # kills notebook OOM from tqdm spam; use W&B instead
+        log_every_n_steps=10,
     )
 
     # 6. Explicit Initialization
