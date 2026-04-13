@@ -156,6 +156,7 @@ class FDDRATPolicy(BasePolicy):
         p_stop_logits = self.router(q_t, k_prev, z_v)
 
         a_coarse_norm = self.action_tokenizer.decode_coarse(latents_masked)
+        print(f"[DEBUG] a_coarse_norm shape: {a_coarse_norm.shape}")
         a_coarse_norm_detached = a_coarse_norm.detach()
 
         delta_a_norm = self.crh(a_coarse_norm_detached, z_v)
