@@ -1,17 +1,25 @@
 import os
 import sys
+
+# Заглушаем rank 1 — чтобы прогресс-бар не дублировался
+_local_rank = int(os.environ.get("LOCAL_RANK", 0))
+if _local_rank != 0:
+    sys.stdout = open(os.devnull, 'w')
+    sys.stderr = open(os.devnull, 'w')
+
 sys.path.insert(0, os.path.abspath('oat'))
 sys.path.insert(0, os.path.abspath('hnet'))
+
+import warnings
+warnings.filterwarnings("ignore", category=UserWarning)
 
 import hydra
 from hydra.core.config_store import ConfigStore
 import pytorch_lightning as pl
 from pytorch_lightning.loggers import WandbLogger
 from pytorch_lightning.callbacks import ModelCheckpoint
-from pytorch_lightning.strategies import FSDPStrategy
+from pytorch_lightning.strategies import FSDPStrategy, DDPStrategy
 from omegaconf import OmegaConf
-
-from pytorch_lightning.strategies import FSDPStrategy, DDPStrategy  # 
 
 from src.core.config_schema import ExperimentConfig
 from src.core.system import LitSystem
@@ -22,21 +30,22 @@ from src.utils.setup import enforce_determinism
 cs = ConfigStore.instance()
 cs.store(name="experiment_config", node=ExperimentConfig)
 
+
 @hydra.main(version_base="1.3", config_path="conf", config_name="config")
 def main(cfg: ExperimentConfig) -> None:
     # 1. Enforce strict reproducibility
     enforce_determinism(cfg.seed)
-    
+
     # 2. Setup Data & System
     datamodule = LitDataModule(cfg)
     system = LitSystem(cfg)
-    
+
     # 3. Setup W&B Logger
     logger = WandbLogger(
         project="VLA-experiment",
         config=OmegaConf.to_container(cfg, resolve=True)
     )
-    
+
     # 4. Setup robust Checkpointing
     checkpoint_callback = ModelCheckpoint(
         dirpath=os.path.join(os.getcwd(), "checkpoints"),
@@ -44,15 +53,14 @@ def main(cfg: ExperimentConfig) -> None:
         save_top_k=3,
         monitor="val_loss",
         mode="min",
-        # FSDP Checkpointing optimization, ensures safe model save
         save_weights_only=True
     )
-    
+
     # 5. Trainer Initialization
     if cfg.strategy.use_fsdp:
         strategy = FSDPStrategy(sharding_strategy=cfg.strategy.sharding_strategy)
     else:
-        strategy = DDPStrategy(find_unused_parameters=True)  # ← было "auto"
+        strategy = DDPStrategy(find_unused_parameters=True)
 
     trainer = pl.Trainer(
         logger=logger,
@@ -64,13 +72,14 @@ def main(cfg: ExperimentConfig) -> None:
         accelerator="auto",
         devices="auto"
     )
-    
-    # 6. Explicit Initialization (Tech Lead Checkpoint)
+
+    # 6. Explicit Initialization
     datamodule.setup()
     system.model.set_normalizer(datamodule.normalizer)
-    
+
     # 7. Execute Training
     trainer.fit(model=system, datamodule=datamodule)
+
 
 if __name__ == "__main__":
     main()
