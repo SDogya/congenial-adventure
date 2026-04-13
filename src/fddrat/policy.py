@@ -84,7 +84,7 @@ class FDDRATPolicy(BasePolicy):
             )
         else:
             self.obs_encoder = nn.Identity()
-        # Определяем реальный 250 через dummy forward
+        # Определяем реальный obs_dim через dummy forward
         if shape_meta is not None:
             dummy_obs = {}
             for key, spec in shape_meta['obs'].items():
@@ -94,14 +94,14 @@ class FDDRATPolicy(BasePolicy):
                 _out = self.obs_encoder(dummy_obs)
                 if _out.dim() == 3:
                     _out = _out.squeeze(1)
-            250 = _out.shape[-1]
-            print(f"[FDDRATPolicy] real 250 = {250}")
+            obs_dim = 250
+            print(f"[FDDRATPolicy] real obs_dim = {obs_dim}")
         else:
-            250 = cfg.250
+            obs_dim = 250
 
-        # 250 = реальный выход энкодера (из конфига, т.к. ProjectionStateEncoder lazy)
+        # obs_dim = реальный выход энкодера (из конфига, т.к. ProjectionStateEncoder lazy)
         # D_v = внутренняя размерность AR-трансформера (должна делиться на num_heads=12)
-        # 250 = cfg.250   # 250 — реальный выход FusedObsEncoder
+        obs_dim = 250  # 250 — реальный выход FusedObsEncoder
         ar_dim = cfg.D_v        # 768 — внутренний dim AR (768 / 12 = 64 ✓)
 
         # 2. Vocab size
@@ -116,21 +116,21 @@ class FDDRATPolicy(BasePolicy):
             self.vocab_size = 1001
             self.embedding_dim = 4
 
-        # 3. AR Model: cond_dim=250 (вход с энкодера), n_emb=ar_dim (внутренний)
+        # 3. AR Model: cond_dim=obs_dim (вход с энкодера), n_emb=ar_dim (внутренний)
         self.ar_model = ARModelWithHiddens(
             vocab_size=self.vocab_size,
             max_seq_len=cfg.H_l + 1,
             max_cond_len=1,
-            cond_dim=250,
+            cond_dim=obs_dim,
             n_emb=ar_dim
         )
 
-        # 4. CRH и Router — принимают реальный 250, не ar_dim
-        self.crh = ContinuousResidualHead(H_a=cfg.H_a, D_a=cfg.D_a, D_v=250)
-        self.router = ShadowRouter(D_v=250)
+        # 4. CRH и Router — принимают реальный obs_dim, не ar_dim
+        self.crh = ContinuousResidualHead(H_a=cfg.H_a, D_a=cfg.D_a, D_v=obs_dim)
+        self.router = ShadowRouter(D_v=obs_dim)
         with torch.no_grad():
             _dummy_a = torch.zeros(1, cfg.H_a, cfg.D_a)
-            _dummy_z = torch.zeros(1, 250)
+            _dummy_z = torch.zeros(1, obs_dim)
             self.crh(_dummy_a, _dummy_z)
         self.loss_fn = FDDRATLoss(lambda_ratio=cfg.lambda_ratio, beta_mse=cfg.beta_mse)
         self.dropout = MaskedNestedDropout(dim=self.embedding_dim)
