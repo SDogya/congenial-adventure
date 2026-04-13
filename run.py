@@ -11,6 +11,8 @@ from pytorch_lightning.callbacks import ModelCheckpoint
 from pytorch_lightning.strategies import FSDPStrategy
 from omegaconf import OmegaConf
 
+from pytorch_lightning.strategies import FSDPStrategy, DDPStrategy  # 
+
 from src.core.config_schema import ExperimentConfig
 from src.core.system import LitSystem
 from src.core.datamodule import LitDataModule
@@ -50,7 +52,7 @@ def main(cfg: ExperimentConfig) -> None:
     if cfg.strategy.use_fsdp:
         strategy = FSDPStrategy(sharding_strategy=cfg.strategy.sharding_strategy)
     else:
-        strategy = "auto"   # PyTorch Lightning picks DDP/single-GPU automatically
+        strategy = DDPStrategy(find_unused_parameters=True)  # ← было "auto"
 
     trainer = pl.Trainer(
         logger=logger,
@@ -58,7 +60,7 @@ def main(cfg: ExperimentConfig) -> None:
         max_epochs=10,
         strategy=strategy,
         precision=cfg.strategy.mixed_precision,
-        sync_batchnorm=cfg.strategy.use_fsdp,  # sync_batchnorm requires distributed
+        sync_batchnorm=cfg.strategy.use_fsdp,
         accelerator="auto",
         devices="auto"
     )
