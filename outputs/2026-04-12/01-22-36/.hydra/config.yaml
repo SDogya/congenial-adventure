@@ -1,9 +1,0 @@
-seed: 42
-batch_size: 32
-learning_rate: 0.0003
-model:
-  name: resnet50
-  hidden_dim: 256
-strategy:
-  sharding_strategy: FULL_SHARD
-  mixed_precision: bf16
