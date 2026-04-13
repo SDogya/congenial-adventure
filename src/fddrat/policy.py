@@ -94,7 +94,8 @@ class FDDRATPolicy(BasePolicy):
             )
             self.action_tokenizer.normalizer = DummyNormalizer()
 
-        # nn.ModuleDict ensures action normalizer stats are serialised into checkpoints
+        # nn.ModuleDict ensures action normalizer stats are serialised into checkpoints.
+        # OAT's LinearNormalizer subclasses nn.Module, so this is safe.
         self.normalizer = nn.ModuleDict()
 
         # Observation encoder
@@ -159,7 +160,7 @@ class FDDRATPolicy(BasePolicy):
         # 1. Observation encoding → z_v [B, D_obs]
         z_v = self.obs_encoder(batch['obs'])
         if z_v.dim() == 3:
-            z_v = z_v.squeeze(1)  # FusedObsEncoder returns [B, To=1, D] → [B, D]
+            z_v = z_v[:, -1, :]  # take last obs step; robust to To>1 unlike squeeze(1)
         B = z_v.size(0)
 
         # 2. Tokenization: action → latents [B, H_l, 4] + tokens [B, H_l]
@@ -213,9 +214,13 @@ class FDDRATPolicy(BasePolicy):
 
         Router and CRH use lr=1e-4 with no weight decay (small heads, fast
         convergence needed).  All other parameters use the global lr and WD.
+
+        Uses identity-based filtering (not name-based) to avoid accidentally
+        misclassifying future layers whose names happen to contain 'router'/'crh'.
         """
-        router_crh = list(self.router.parameters()) + list(self.crh.parameters())
-        base = [p for n, p in self.named_parameters() if 'router' not in n and 'crh' not in n]
+        router_crh_ids = {id(p) for p in list(self.router.parameters()) + list(self.crh.parameters())}
+        base = [p for p in self.parameters() if id(p) not in router_crh_ids]
+        router_crh = [p for p in self.parameters() if id(p) in router_crh_ids]
         return [
             {"params": base},
             {"params": router_crh, "weight_decay": 0.0, "lr": 1e-4},
@@ -243,7 +248,7 @@ class FDDRATPolicy(BasePolicy):
         B = obs.size(0)
         z_v = self.obs_encoder(obs)
         if z_v.dim() == 3:
-            z_v = z_v.squeeze(1)
+            z_v = z_v[:, -1, :]  # take last obs step; robust to To>1
 
         bos_id = getattr(self.action_tokenizer, 'bos_id', self.vocab_size - 1)
         tokens_in = torch.full((B, 1), bos_id, device=obs.device, dtype=torch.long)
@@ -255,6 +260,9 @@ class FDDRATPolicy(BasePolicy):
             latents = self.action_tokenizer.bos_id_emb.expand(B, 1, -1)
 
         tokens_generated = []
+        # Note: each AR step re-runs the full prefix (O(H_l²) attention).
+        # With H_l=8 this is negligible (64 ops). If H_l grows, add KV-cache
+        # to ARModelWithHiddens to make inference O(H_l) instead.
         for t in range(self.cfg.H_l):
             logits_step, hidden_states = self.ar_model(tokens_in, cond=cond_input)
 

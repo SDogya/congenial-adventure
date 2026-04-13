@@ -34,19 +34,26 @@ class LitSystem(pl.LightningModule):
 
     def training_step(self, batch: Any, batch_idx: int) -> Dict[str, torch.Tensor]:
         loss = self.model(batch)["loss"]
-        self.log("train_loss", loss, on_step=True, on_epoch=True, prog_bar=True, sync_dist=True)
+        self.log("train_loss", loss, batch_size=batch['action'].size(0),
+                 on_step=True, on_epoch=True, prog_bar=True, sync_dist=True)
         return {"loss": loss}
 
     def validation_step(self, batch: Any, batch_idx: int) -> Dict[str, torch.Tensor]:
         loss = self.model(batch)["loss"]
-        self.log("val_loss", loss, on_epoch=True, prog_bar=True, sync_dist=True)
+        self.log("val_loss", loss, batch_size=batch['action'].size(0),
+                 on_epoch=True, prog_bar=True, sync_dist=True)
         return {"val_loss": loss}
 
     def configure_optimizers(self) -> Dict[str, Any]:
-        """AdamW with cosine annealing; router/CRH use separate lr=1e-4, no WD."""
+        """AdamW with cosine annealing; router/CRH use separate lr=1e-4, no WD.
+
+        T_max is set to the total number of optimizer steps computed by Lightning
+        from (num_epochs * batches_per_epoch / accumulate_grad_batches).
+        Hard-coding T_max would cause LR to hit zero at the wrong time.
+        """
         optimizer = torch.optim.AdamW(
             self.model.get_optimizer_params(),
             lr=self.cfg.learning_rate,
         )
-        scheduler = CosineAnnealingLR(optimizer, T_max=100)
+        scheduler = CosineAnnealingLR(optimizer, T_max=self.trainer.estimated_stepping_batches)
         return {"optimizer": optimizer, "lr_scheduler": {"scheduler": scheduler, "interval": "step"}}
