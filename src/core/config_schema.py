@@ -12,11 +12,11 @@ class FDDRATConfig:
     lambda_ratio: float = 1.0
     beta_mse: float = 1.0
     target_ratio: float = 0.5
-    H_a: int = 16
+    H_a: int = 32   # OAT decoder sample_horizon (train_oattok.yaml: horizon=32)
     D_a: int = 7
-    obs_dim: int = 138    # ← было 250; реальный выход FusedObsEncode
+    obs_dim: int = 138    # реальный выход FusedObsEncoder для LIBERO10
     D_v: int = 768
-    H_l: int = 64
+    H_l: int = 8    # OAT encoder num_registers = latent sequence length
     tokenizer_ckpt: Optional[str] = None
 @dataclass
 class ExperimentConfig:

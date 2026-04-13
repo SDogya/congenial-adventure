@@ -151,9 +151,11 @@ class FDDRATPolicy(BasePolicy):
         # print(f"[DEBUG] cond_input: {cond_input.shape}")
         logits, hidden_states = self.ar_model(tokens_ar, cond=cond_input)
 
-        q_t = hidden_states[:, 1:, :]
-        k_prev = hidden_states[:, :-1, :]
-        p_stop_logits = self.router(q_t, k_prev, z_v)
+        # Decoupled Training: detach hidden states so router BCE loss
+        # cannot backprop into the AR backbone (hypothesis requirement)
+        q_t = hidden_states[:, 1:, :].detach()
+        k_prev = hidden_states[:, :-1, :].detach()
+        p_stop_logits = self.router(q_t, k_prev, z_v.detach())
 
         a_coarse_norm = self.action_tokenizer.decode_coarse(latents_masked)
         # print(f"[DEBUG] a_coarse_norm shape: {a_coarse_norm.shape}")
