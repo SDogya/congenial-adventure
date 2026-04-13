@@ -84,10 +84,24 @@ class FDDRATPolicy(BasePolicy):
             )
         else:
             self.obs_encoder = nn.Identity()
+        # Определяем реальный obs_dim через dummy forward
+        if shape_meta is not None:
+            dummy_obs = {}
+            for key, spec in shape_meta['obs'].items():
+                shape = spec['shape']
+                dummy_obs[key] = torch.zeros(1, 1, *shape)
+            with torch.no_grad():
+                _out = self.obs_encoder(dummy_obs)
+                if _out.dim() == 3:
+                    _out = _out.squeeze(1)
+            obs_dim = _out.shape[-1]
+            print(f"[FDDRATPolicy] real obs_dim = {obs_dim}")
+        else:
+            obs_dim = cfg.obs_dim
 
         # obs_dim = реальный выход энкодера (из конфига, т.к. ProjectionStateEncoder lazy)
         # D_v = внутренняя размерность AR-трансформера (должна делиться на num_heads=12)
-        obs_dim = cfg.obs_dim   # 250 — реальный выход FusedObsEncoder
+        # obs_dim = cfg.obs_dim   # 250 — реальный выход FusedObsEncoder
         ar_dim = cfg.D_v        # 768 — внутренний dim AR (768 / 12 = 64 ✓)
 
         # 2. Vocab size
