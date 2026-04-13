@@ -112,7 +112,7 @@ class FDDRATPolicy(BasePolicy):
             cond_dim=obs_dim,
             n_emb=ar_dim
         )
-        print(f"[Debug] вот значение Oobs dim перед спавно srh {obs_dim}")
+        # print(f"[Debug] вот значение Oobs dim перед спавно srh {obs_dim}")
         # 4. CRH и Router — принимают реальный obs_dim, не ar_dim
         self.crh = ContinuousResidualHead(H_a=cfg.H_a, D_a=cfg.D_a, D_v=obs_dim)
         self.router = ShadowRouter(D_v=obs_dim)
@@ -127,11 +127,11 @@ class FDDRATPolicy(BasePolicy):
 
     def forward(self, batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         z_v = self.obs_encoder(batch['obs'])
-        print(f"[DEBUG] obs_encoder output shape: {z_v.shape}")
+        # print(f"[DEBUG] obs_encoder output shape: {z_v.shape}")
         if z_v.dim() == 3:
             z_v = z_v.squeeze(1)
         B = z_v.size(0)
-        print(f"[DEBUG] z_v after squeeze: {z_v.shape}")
+        # print(f"[DEBUG] z_v after squeeze: {z_v.shape}")
         latents, tokens = self.action_tokenizer.encode(batch['action'])
         if tokens.dim() == 3 and tokens.shape[-1] == 1:
             tokens = tokens.squeeze(-1)
@@ -148,7 +148,7 @@ class FDDRATPolicy(BasePolicy):
         tokens_ar = torch.cat([bos_tokens, tokens_masked], dim=1)
 
         cond_input = z_v.unsqueeze(1)
-        print(f"[DEBUG] cond_input: {cond_input.shape}")
+        # print(f"[DEBUG] cond_input: {cond_input.shape}")
         logits, hidden_states = self.ar_model(tokens_ar, cond=cond_input)
 
         q_t = hidden_states[:, 1:, :]
@@ -156,7 +156,7 @@ class FDDRATPolicy(BasePolicy):
         p_stop_logits = self.router(q_t, k_prev, z_v)
 
         a_coarse_norm = self.action_tokenizer.decode_coarse(latents_masked)
-        print(f"[DEBUG] a_coarse_norm shape: {a_coarse_norm.shape}")
+        # print(f"[DEBUG] a_coarse_norm shape: {a_coarse_norm.shape}")
         a_coarse_norm_detached = a_coarse_norm.detach()
 
         delta_a_norm = self.crh(a_coarse_norm_detached, z_v)
