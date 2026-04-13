@@ -2,7 +2,7 @@ defaults:
   - experiment_config   # loads ExperimentConfig dataclass (provides shape_meta, dataset_path defaults)
   - _self_
   - model: baseline
-  - strategy: fsdp
+  - strategy: ddp_unused
 
 seed: 42
 batch_size: 32
