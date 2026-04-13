@@ -1,0 +1,2 @@
+/home/sdogya/Documents/laststand/code/src/model/eval_mod.ckpt filter=lfs diff=lfs merge=lfs -text
+*.ckpt filter=lfs diff=lfs merge=lfs -text
