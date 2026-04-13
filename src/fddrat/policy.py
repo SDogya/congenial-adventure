@@ -3,13 +3,11 @@ import torch.nn as nn
 from typing import Dict, Any, List
 from oat.model.common.normalizer import LinearNormalizer
 
-
 try:
     from oat.policy.base_policy import BasePolicy
 except ImportError:
     class BasePolicy(nn.Module):
         pass
-
 
 from oat.model.autoregressive.transformer import AutoregressiveModel
 from oat.tokenizer.oat.model.token_dropout import MaskedNestedDropout
@@ -65,7 +63,7 @@ class FDDRATPolicy(BasePolicy):
 
         self.normalizer = nn.ModuleDict()
 
-        # 1. Observation Flow (Multimodal Fused Encoder)
+        # 1. Observation encoder
         if shape_meta is not None:
             from oat.perception.fused_obs_encoder import FusedObservationEncoder
             from omegaconf import OmegaConf
@@ -84,14 +82,15 @@ class FDDRATPolicy(BasePolicy):
                 vision_encoder=OmegaConf.create(vision_dict),
                 state_encoder=OmegaConf.create(state_dict)
             )
-            # Реальная размерность через dummy forward — единственный надёжный способ,
-            # т.к. output_feature_dim() не учитывает lazy-инициализацию ProjectionStateEncoder
-            obs_dim = cfg.D_v
         else:
             self.obs_encoder = nn.Identity()
-            obs_dim = cfg.D_v
 
-        # Vocab size
+        # obs_dim = реальный выход энкодера (из конфига, т.к. ProjectionStateEncoder lazy)
+        # D_v = внутренняя размерность AR-трансформера (должна делиться на num_heads=12)
+        obs_dim = cfg.obs_dim   # 250 — реальный выход FusedObsEncoder
+        ar_dim = cfg.D_v        # 768 — внутренний dim AR (768 / 12 = 64 ✓)
+
+        # 2. Vocab size
         if hasattr(self.action_tokenizer, 'quantizer'):
             self.vocab_size = self.action_tokenizer.quantizer.codebook_size + 1
             self.embedding_dim = getattr(
@@ -103,41 +102,20 @@ class FDDRATPolicy(BasePolicy):
             self.vocab_size = 1001
             self.embedding_dim = 4
 
+        # 3. AR Model: cond_dim=obs_dim (вход с энкодера), n_emb=ar_dim (внутренний)
         self.ar_model = ARModelWithHiddens(
             vocab_size=self.vocab_size,
             max_seq_len=cfg.H_l + 1,
             max_cond_len=1,
             cond_dim=obs_dim,
-            n_emb=cfg.D_v
+            n_emb=ar_dim
         )
 
-        # CRH и Router используют obs_dim — реальный, не cfg.D_v
+        # 4. CRH и Router — принимают реальный obs_dim, не ar_dim
         self.crh = ContinuousResidualHead(H_a=cfg.H_a, D_a=cfg.D_a, D_v=obs_dim)
         self.router = ShadowRouter(D_v=obs_dim)
         self.loss_fn = FDDRATLoss(lambda_ratio=cfg.lambda_ratio, beta_mse=cfg.beta_mse)
         self.dropout = MaskedNestedDropout(dim=self.embedding_dim)
-
-    # ------------------------------------------------------------------ #
-    #  Вспомогательный метод: строит dummy-батч из shape_meta и прогоняет
-    #  через obs_encoder, чтобы получить точную выходную размерность.
-    #  Вызывается один раз в __init__ до создания CRH/Router/AR.
-    # ------------------------------------------------------------------ #
-    def _infer_obs_dim(self, shape_meta: dict) -> int:
-        dummy_obs = {}
-        for key, spec in shape_meta['obs'].items():
-            shape = spec['shape']           # например [3, 84, 84] или [9]
-            # FusedObsEncoder ожидает [B, To, *obs_shape]; используем B=1, To=1
-            dummy_obs[key] = torch.zeros(1, 1, *shape)
-
-        self.obs_encoder.eval()
-        with torch.no_grad():
-            out = self.obs_encoder(dummy_obs)   # [1, 1, D] или [1, D]
-            if out.dim() == 3:
-                out = out.squeeze(1)            # → [1, D]
-        self.obs_encoder.train()
-
-        obs_dim = out.shape[-1]
-        return obs_dim
 
     def set_normalizer(self, normalizer: LinearNormalizer) -> None:
         if hasattr(self.obs_encoder, 'set_normalizer'):

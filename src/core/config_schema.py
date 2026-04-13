@@ -14,6 +14,7 @@ class FDDRATConfig:
     target_ratio: float = 0.5
     H_a: int = 16
     D_a: int = 7    # action dimension (matches shape_meta action.shape[0])
+    obs_dim: int = 250
     D_v: int = 768
     H_l: int = 64
     tokenizer_ckpt: Optional[str] = None   # path to OAT tokenizer .ckpt; None → mock/dry-run
