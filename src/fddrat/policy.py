@@ -128,6 +128,10 @@ class FDDRATPolicy(BasePolicy):
         # 4. CRH и Router — принимают реальный obs_dim, не ar_dim
         self.crh = ContinuousResidualHead(H_a=cfg.H_a, D_a=cfg.D_a, D_v=obs_dim)
         self.router = ShadowRouter(D_v=obs_dim)
+        with torch.no_grad():
+            _dummy_a = torch.zeros(1, cfg.H_a, cfg.D_a)
+            _dummy_z = torch.zeros(1, obs_dim)
+            self.crh(_dummy_a, _dummy_z)
         self.loss_fn = FDDRATLoss(lambda_ratio=cfg.lambda_ratio, beta_mse=cfg.beta_mse)
         self.dropout = MaskedNestedDropout(dim=self.embedding_dim)
 
