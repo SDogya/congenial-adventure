@@ -1,8 +1,8 @@
-# FD-DRAT baseline configuration
 lambda_ratio: 1.0
 beta_mse: 1.0
 H_a: 16
 D_a: 7
-D_v: 768        # ← было 250; AR transformer n_emb, должно делиться на num_heads=8
+D_v: 768        # n_emb AR-трансформера, 768 / 12 heads = 64 ✓
+obs_dim: 250    # реальный выход FusedObsEncoder (250 = 2*112 + 26 state)
 H_l: 64
 target_ratio: 0.5
