@@ -2,9 +2,9 @@
 
 1. [Обзор инструментов](TASK/1/obzor.pdf) — сравнение DeepResearch, Claude Code, AutoResearch
 2. [Логи общения с LLM](TASK/2_logs/) — обзоры статей, роли агентов, логи кодера и ревьювера
-3. [Код и инструкция по запуску](#быстрый-старт) — ниже
+3. [Код и инструкция по запуску](#быстрый-старт) — ниже (для клода должен сработать файл CC_local_repr.md )
 4. [Результаты eval](eval_results/) — `eval_log.json` с per-task SR и latency
-5. [Отчёт (черновик статьи)](TASK/4_draft/draft.pdf)
+5. [Отчёт (draft)](TASK/4_draft/draft.pdf)
 6. https://wandb.ai/sebersehmer-nopeinc/VLA-experiment/reports/Untitled-Report--VmlldzoxNjUxMzU1MA?accessToken=dp2lkg5wxwpsk6agt7xlskcil1d121w7382tecduvuf2s8hc1x0b8290fgmkpx05 - графики с wandb, самые первые - токенизатор, стоит смотреть только на те, которые длились больше 20 минут.
 ---
 
@@ -19,7 +19,7 @@
 - **L_ratio** — BCE роутера (обучается предсказывать целевой коэффициент сжатия)
 - **L_mse** — MSE остатка CRH (маскируется, если K == H_l)
 
-Подробнее про гипотезу и математику: [`hypotesis.md`](hypotesis.md)  
+Подробнее про гипотезу и математику: [`hypotesis.md`](TASK/2_logs/hypotesis.md)  
 Черновик статьи в формате Typst: [`paperdraft/fork.typ`](paperdraft/fork.typ)
 
 ---
