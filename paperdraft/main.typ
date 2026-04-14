@@ -103,22 +103,50 @@ At inference the AR loop generates tokens one by one; after each step the router
 == Results
 
 #block(
-  fill: rgb("fff8e1"),
-  stroke: rgb("f0c040"),
+  fill: rgb("fff3cd"),
+  stroke: rgb("e0a800"),
   inset: 10pt,
   radius: 4pt,
   width: 100%,
 )[
-  *Results pending.* Evaluation in progress on LIBERO-10. This section will report per-task and mean success rates, p99 / mean latency at BS=1, and ablation results for all baselines.
+  *Training implementation note.* The results below reflect a prototype run with a configuration bug: `cfg.H_l` was set to the default value of 64 while the OAT tokenizer uses `H_l = 8`. As a consequence, the Nested Dropout sampled $K tilde "Uniform"{1,...,64}$, but latents beyond index 8 do not exist — so dropout was effectively applied in only $approx 12.5%$ of training steps instead of the intended $approx 50%$. This reduced the CRH's exposure to partial-prefix inputs and likely suppressed the router's early-exit signal. A corrected run with `model.H_l=8` is required before drawing conclusions about the routing mechanism. The numbers below are reported as-is for completeness.
 ]
+
+The evaluation used 50 rollouts across all 10 LIBERO-10 tasks (5 per task), single run (`num_exp = 1`), batch size 1, on a Kaggle T4 GPU.
+
+#figure(
+  table(
+    columns: (auto, auto),
+    align: (left, center),
+    stroke: 0.5pt,
+    [*Task*], [*Success Rate*],
+    [Kitchen: turn on stove, place moka pot], [0%],
+    [Kitchen: bowl in bottom cabinet drawer], [*40%*],
+    [Kitchen: mug in microwave], [0%],
+    [Kitchen: both moka pots on stove], [*20%*],
+    [Living room: soup + cream cheese in basket], [0%],
+    [Living room: soup + tomato sauce in basket], [0%],
+    [Living room: cream cheese + butter in basket], [0%],
+    [Living room: dual mug plate placement], [0%],
+    [Living room: mug + pudding placement], [0%],
+    [Study: book in caddy], [0%],
+    table.hline(),
+    [*Mean*], [*6.0%*],
+  ),
+  caption: [Per-task success rates on LIBERO-10 (prototype run, H_l bug present).],
+)
+
+*Latency (BS=1, T4 GPU).* Mean inference latency: $98.1$ ms. p99 latency: $310.7$ ms. No baseline comparisons are available for this run.
+
+*Interpretation.* Only two tasks show non-zero success rates (40% and 20%), both involving single-object pick-and-place into a visually distinctive container. Tasks requiring dual-object manipulation or precise contact (stove knob, drawer, caddy) score 0%. Given the training bug, these results cannot be attributed to the routing mechanism; they reflect the AR backbone + CRH operating mostly without nested-dropout regularisation.
 
 = Discussion
 
 *When does the router fire?* We expect early exit on straight-line reaching phases and suppressed exit on contact-rich segments (peg insertion, lid removal). The visual threshold $tau(bold(z)_v)$ provides observation-level adaptation; whether the visual embedding carries sufficient signal for this is an open question the evaluation will address.
 
-*Posterior collapse without decoupling.* Training the router without detaching hidden states caused the AR token distribution to collapse toward a degenerate mode where all tokens are identical. The CE loss alone could not counteract this because the router gradient dominated numerically. Decoupled Training resolved the collapse; quantitative effects on token entropy are reported in Section 5.
+*Posterior collapse without decoupling.* Training the router without detaching hidden states caused the AR token distribution to collapse toward a degenerate mode where all tokens are identical. The CE loss alone could not counteract this because the router gradient dominated numerically. Decoupled Training resolved the collapse; quantitative verification requires a corrected training run.
 
-*Limitations.* (1) The CRH has no uncertainty signal—an overconfident correction on a very imprecise coarse trajectory is possible. (2) The router decision is binary per step; soft or ensemble routing may improve robustness. (3) Evaluation on a single benchmark; generalisation to LIBERO-LONG is left to future work.
+*Limitations.* (1) *H_l configuration mismatch (prototype bug).* The reported run used `cfg.H_l = 64` while the OAT tokenizer was trained with `H_l = 8`. Nested Dropout was applied in only ~12.5% of training steps, severely reducing CRH and router training signal on partial prefixes. A corrected run with `model.H_l = 8` is the immediate next step. (2) The CRH has no uncertainty signal—an overconfident correction on a very imprecise coarse trajectory is possible. (3) The router decision is binary per step; soft or ensemble routing may improve robustness. (4) No baseline comparisons in this run; ablations remain for future work.
 
 = Future Work
 

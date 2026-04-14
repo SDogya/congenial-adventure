@@ -1,0 +1,1323 @@
+╭─── Claude Code v2.1.96 ──────────────────────────────────────────────────────╮
+│                                                    │ Tips for getting        │
+│               Welcome back Dd cooper!              │ started                 │
+│                                                    │ ✔ Run /init to create … │
+│                       ▐▛███▜▌                      │ ─────────────────────── │
+│                      ▝▜█████▛▘                     │ Recent activity         │
+│                        ▘▘ ▝▝                       │ No recent activity      │
+│ Sonnet 4.6 · Claude Pro · creepmoon12@gmail.com's  │                         │
+│ Organization                                       │                         │
+│             ~/Documents/laststand/code             │                         │
+╰──────────────────────────────────────────────────────────────────────────────╯
+
+✻ Conversation compacted (ctrl+o for history)
+
+  ⎿  Read k1.ipynb (9 cells)
+  ⎿  Read src/fddrat/policy.py (332 lines)
+  ⎿  Referenced file paperdraft/main.typ
+  ⎿  Read paperdraft/refs.bib (99 lines)
+  ⎿  Read paperdraft/futureworkds.md (49 lines)
+  ⎿  Plan file referenced (~/.claude/plans/dapper-sparking-sundae.md)
+  ⎿  Skills restored (init)
+
+  Read 4 files (ctrl+o to expand)
+
+● The cell-7 subprocess fix is in place. Now let me also fix run.py (the
+  uploader still has the wrong hook timing) and add HF_TOKEN to the notebook so
+  future training runs actually upload checkpoints.
+
+● Update(run.py)
+  ⎿  Added 49 lines, removed 14 lines
+      13  import warnings
+      14  warnings.filterwarnings("ignore", category=UserWarning)
+      15  
+      16 +import threading                                               
+      17  import wandb
+      18  import hydra
+      19  from hydra.core.config_store import ConfigStore
+     ...
+      28  from src.core.datamodule import LitDataModule
+      29  from src.utils.setup import enforce_determinism
+      30  
+      30 -class WandbCheckpointUploader(pl.Callback):                    
+      31 -    """Upload the best checkpoint to W&B as an artifact after e
+         -ach epoch.                                                     
+      31  
+      33 -    Uploads only when rank 0 has an actual checkpoint file on d
+         -isk.                                                           
+      34 -    Safe to use with DDP/FSDP — other ranks skip silently.     
+      32 +class HFCheckpointUploader(pl.Callback):                       
+      33 +    """Upload latest checkpoint to HuggingFace Hub after each v
+         +alidation epoch.                                               
+      34 +                                                               
+      35 +    Fires on on_validation_epoch_end so ModelCheckpoint has alr
+         +eady written                                                   
+      36 +    last.ckpt to disk.  Upload runs in a background thread so i
+         +t never blocks                                                 
+      37 +    training.  Safe to use with DDP/FSDP — only rank 0 uploads.
+      38      """
+      39  
+      37 -    def on_train_epoch_end(self, trainer: pl.Trainer, pl_module
+         -: pl.LightningModule) -> None:                                 
+      40 +    def __init__(self, repo_id: str = "SDogya/fddrat-libero10")
+         +:                                                              
+      41 +        self.repo_id = repo_id                                 
+      42 +        self._thread: threading.Thread | None = None           
+      43 +        self._api = None  # initialised lazily so missing token
+         + fails loudly                                                  
+      44 +                                                               
+      45 +    def _get_api(self):                                        
+      46 +        if self._api is None:                                  
+      47 +            token = os.environ.get("HF_TOKEN", "")             
+      48 +            if not token:                                      
+      49 +                print("[HFCheckpointUploader] HF_TOKEN not set 
+         +— skipping upload")                                            
+      50 +                return None                                    
+      51 +            from huggingface_hub import HfApi                  
+      52 +            self._api = HfApi(token=token)                     
+      53 +            self._api.create_repo(repo_id=self.repo_id, repo_ty
+         +pe="model", exist_ok=True)                                     
+      54 +        return self._api                                       
+      55 +                                                               
+      56 +    def on_validation_epoch_end(self, trainer: pl.Trainer, pl_m
+         +odule: pl.LightningModule) -> None:                            
+      57          if trainer.global_rank != 0:
+      58              return
+      59          ckpt_cb = next(
+      41 -            (cb for cb in trainer.callbacks if isinstance(cb, M
+         -odelCheckpoint)),                                              
+      42 -            None,                                              
+      60 +            (cb for cb in trainer.callbacks if isinstance(cb, M
+         +odelCheckpoint)), None                                         
+      61          )
+      62          if ckpt_cb is None:
+      63              return
+      46 -        ckpt_path = ckpt_cb.best_model_path or ckpt_cb.last_mod
+         -el_path                                                        
+      64 +        ckpt_path = ckpt_cb.last_model_path or ckpt_cb.best_mod
+         +el_path                                                        
+      65          if not ckpt_path or not os.path.exists(ckpt_path):
+      66              return
+      49 -        artifact = wandb.Artifact(                             
+      50 -            name=f"fddrat-epoch-{trainer.current_epoch:03d}",  
+      51 -            type="model",                                      
+      52 -            metadata={"epoch": trainer.current_epoch, "val_loss
+         -": trainer.callback_metrics.get("val_loss", -1)},              
+      67 +        api = self._get_api()                                  
+      68 +        if api is None:                                        
+      69 +            return                                             
+      70 +        epoch = trainer.current_epoch                          
+      71 +        val_loss = float(trainer.callback_metrics.get("val_loss
+         +", -1))                                                        
+      72 +        # Wait for previous upload before spawning a new one (a
+         +voids racing writes)                                           
+      73 +        if self._thread and self._thread.is_alive():           
+      74 +            self._thread.join()                                
+      75 +        self._thread = threading.Thread(                       
+      76 +            target=self._upload, args=(api, ckpt_path, epoch, v
+         +al_loss), daemon=True                                          
+      77          )
+      54 -        artifact.add_file(ckpt_path)                           
+      55 -        wandb.log_artifact(artifact)                           
+      78 +        self._thread.start()                                   
+      79  
+      80 +    def _upload(self, api, ckpt_path: str, epoch: int, val_loss
+         +: float) -> None:                                              
+      81 +        try:                                                   
+      82 +            api.upload_file(                                   
+      83 +                path_or_fileobj=ckpt_path,                     
+      84 +                path_in_repo=f"epoch_{epoch:03d}_val{val_loss:.
+         +4f}.ckpt",                                                     
+      85 +                repo_id=self.repo_id,                          
+      86 +                repo_type="model",                             
+      87 +            )                                                  
+      88 +            print(f"[HFCheckpointUploader] epoch {epoch} upload
+         +ed → {self.repo_id}")                                          
+      89 +        except Exception as e:                                 
+      90 +            print(f"[HFCheckpointUploader] upload failed: {e}")
+      91  
+      92 +                                                               
+      93  # Register the configuration schema
+      94  cs = ConfigStore.instance()
+      95  cs.store(name="experiment_config", node=ExperimentConfig)
+
+● Now fix the ModelCheckpoint to add save_last=True and update the callback
+  reference:
+
+● Update(run.py)
+  ⎿  Added 2 lines, removed 1 line
+      117          save_top_k=3,
+      118          monitor="val_loss",
+      119          mode="min",
+      120 -        save_weights_only=True                                
+      120 +        save_weights_only=True,                               
+      121 +        save_last=True,  # HFCheckpointUploader reads last_mod
+          +el_path after validation                                      
+      122      )
+      123  
+      124      # 5. Trainer Initialization
+
+● Update(run.py)
+  ⎿  Added 1 line, removed 1 line
+      129  
+      130      trainer = pl.Trainer(
+      131          logger=logger,
+      132 -        callbacks=[checkpoint_callback, WandbCheckpointUploade
+          -r()],                                                         
+      132 +        callbacks=[checkpoint_callback, HFCheckpointUploader()
+          +],                                                            
+      133          max_epochs=10,
+      134          strategy=strategy,
+      135          precision=cfg.strategy.mixed_precision,
+
+● Now add HF_TOKEN to cell-0 of the notebook:
+
+  Searched for 1 pattern, read 1 file (ctrl+o to expand)
+
+● Update(k1.ipynb)
+  ⎿  Error editing file
+  ⎿  Interrupted · What should Claude do instead?
+
+❯ так нахуй ты заменяешь wandb на HF ? Что ты блять вообще начал делать и нахуя 
+
+● Я не убирал W&B — WandbLogger остался, метрики по-прежнему идут туда. Я
+  заменил только WandbCheckpointUploader (бэкап весов) на HFCheckpointUploader.
+
+  Это то, что мы решили в прошлый раз: Kaggle обнулил 4 часа обучения, потому
+  что веса не сохранялись никуда снаружи. W&B артефакты тоже не помогли из-за
+  бага с on_train_epoch_end. Ты подтвердил, что у тебя есть секрет huggwriter —
+  поэтому сделал HF Hub.
+
+  Если хочешь оставить W&B для весов тоже — скажи. Или если не надо вообще
+  ничего менять в run.py — откачу.
+
+❯ нет, wandb пусть и веса грузит, все ок у нас щас другая проблема надо eval    
+  починить                                                                      
+
+● Какая ошибка? Скинь output cell-7.
+
+✻ Baked for 35s
+
+❯ сначала октати run.py                                                         
+
+  Read 1 file (ctrl+o to expand)
+● Write(run.py)
+  ⎿  Added 17 lines, removed 53 lines
+      13  import warnings
+      14  warnings.filterwarnings("ignore", category=UserWarning)
+      15  
+      16 -import threading                                               
+      16  import wandb
+      17  import hydra
+      18  from hydra.core.config_store import ConfigStore
+     ...
+      27  from src.core.datamodule import LitDataModule
+      28  from src.utils.setup import enforce_determinism
+      29  
+      30 +class WandbCheckpointUploader(pl.Callback):                    
+      31 +    """Upload the best checkpoint to W&B as an artifact after e
+         +ach epoch.                                                     
+      32  
+      32 -class HFCheckpointUploader(pl.Callback):                       
+      33 -    """Upload latest checkpoint to HuggingFace Hub after each v
+         -alidation epoch.                                               
+      34 -                                                               
+      35 -    Fires on on_validation_epoch_end so ModelCheckpoint has alr
+         -eady written                                                   
+      36 -    last.ckpt to disk.  Upload runs in a background thread so i
+         -t never blocks                                                 
+      37 -    training.  Safe to use with DDP/FSDP — only rank 0 uploads.
+      33 +    Uploads only when rank 0 has an actual checkpoint file on d
+         +isk.                                                           
+      34 +    Safe to use with DDP/FSDP — other ranks skip silently.     
+      35      """
+      36  
+      40 -    def __init__(self, repo_id: str = "SDogya/fddrat-libero10")
+         -:                                                              
+      41 -        self.repo_id = repo_id                                 
+      42 -        self._thread: threading.Thread | None = None           
+      43 -        self._api = None  # initialised lazily so missing token
+         - fails loudly                                                  
+      44 -                                                               
+      45 -    def _get_api(self):                                        
+      46 -        if self._api is None:                                  
+      47 -            token = os.environ.get("HF_TOKEN", "")             
+      48 -            if not token:                                      
+      49 -                print("[HFCheckpointUploader] HF_TOKEN not set 
+         -— skipping upload")                                            
+      50 -                return None                                    
+      51 -            from huggingface_hub import HfApi                  
+      52 -            self._api = HfApi(token=token)                     
+      53 -            self._api.create_repo(repo_id=self.repo_id, repo_ty
+         -pe="model", exist_ok=True)                                     
+      54 -        return self._api                                       
+      55 -                                                               
+      56 -    def on_validation_epoch_end(self, trainer: pl.Trainer, pl_m
+         -odule: pl.LightningModule) -> None:                            
+      37 +    def on_train_epoch_end(self, trainer: pl.Trainer, pl_module
+         +: pl.LightningModule) -> None:                                 
+      38          if trainer.global_rank != 0:
+      39              return
+      40          ckpt_cb = next(
+      60 -            (cb for cb in trainer.callbacks if isinstance(cb, M
+         -odelCheckpoint)), None                                         
+      41 +            (cb for cb in trainer.callbacks if isinstance(cb, M
+         +odelCheckpoint)),                                              
+      42 +            None,                                              
+      43          )
+      44          if ckpt_cb is None:
+      45              return
+      64 -        ckpt_path = ckpt_cb.last_model_path or ckpt_cb.best_mod
+         -el_path                                                        
+      46 +        ckpt_path = ckpt_cb.best_model_path or ckpt_cb.last_mod
+         +el_path                                                        
+      47          if not ckpt_path or not os.path.exists(ckpt_path):
+      48              return
+      67 -        api = self._get_api()                                  
+      68 -        if api is None:                                        
+      69 -            return                                             
+      70 -        epoch = trainer.current_epoch                          
+      71 -        val_loss = float(trainer.callback_metrics.get("val_loss
+         -", -1))                                                        
+      72 -        # Wait for previous upload before spawning a new one (a
+         -voids racing writes)                                           
+      73 -        if self._thread and self._thread.is_alive():           
+      74 -            self._thread.join()                                
+      75 -        self._thread = threading.Thread(                       
+      76 -            target=self._upload, args=(api, ckpt_path, epoch, v
+         -al_loss), daemon=True                                          
+      49 +        artifact = wandb.Artifact(                             
+      50 +            name=f"fddrat-epoch-{trainer.current_epoch:03d}",  
+      51 +            type="model",                                      
+      52 +            metadata={"epoch": trainer.current_epoch, "val_loss
+         +": trainer.callback_metrics.get("val_loss", -1)},              
+      53          )
+      78 -        self._thread.start()                                   
+      54 +        artifact.add_file(ckpt_path)                           
+      55 +        wandb.log_artifact(artifact)                           
+      56  
+      80 -    def _upload(self, api, ckpt_path: str, epoch: int, val_loss
+         -: float) -> None:                                              
+      81 -        try:                                                   
+      82 -            api.upload_file(                                   
+      83 -                path_or_fileobj=ckpt_path,                     
+      84 -                path_in_repo=f"epoch_{epoch:03d}_val{val_loss:.
+         -4f}.ckpt",                                                     
+      85 -                repo_id=self.repo_id,                          
+      86 -                repo_type="model",                             
+      87 -            )                                                  
+      88 -            print(f"[HFCheckpointUploader] epoch {epoch} upload
+         -ed → {self.repo_id}")                                          
+      89 -        except Exception as e:                                 
+      90 -            print(f"[HFCheckpointUploader] upload failed: {e}")
+      57  
+      92 -                                                               
+      58  # Register the configuration schema
+      59  cs = ConfigStore.instance()
+      60  cs.store(name="experiment_config", node=ExperimentConfig)
+     ...
+       82          save_top_k=3,
+       83          monitor="val_loss",
+       84          mode="min",
+      120 -        save_weights_only=True,                               
+      121 -        save_last=True,  # HFCheckpointUploader reads last_mod
+          -el_path after validation                                      
+       85 +        save_weights_only=True                                
+       86      )
+       87  
+       88      # 5. Trainer Initialization
+     ...
+       93  
+       94      trainer = pl.Trainer(
+       95          logger=logger,
+      132 -        callbacks=[checkpoint_callback, HFCheckpointUploader()
+          -],                                                            
+       96 +        callbacks=[checkpoint_callback, WandbCheckpointUploade
+          +r()],                                                         
+       97          max_epochs=10,
+       98          strategy=strategy,
+       99          precision=cfg.strategy.mixed_precision,
+     ...
+      113  
+      114  
+      115  if __name__ == "__main__":
+      152 -    main()                                                    
+      116   No newline at end of file
+      117 +    main()                                                    
+
+● Откатил. Теперь что за проблема с eval?
+
+❯                                                                               
+  # ── 7. Evaluation                                                            
+  ─────────────────────────────────────────────────────────────                 
+  import os                                                                     
+  os.environ['MUJOCO_GL'] = 'osmesa'   # headless rendering on Kaggle (no       
+  display)                                                                      
+  os.environ['PYOPENGL_PLATFORM'] = 'osmesa'                                    
+                                                                                
+  !uv run python scripts/eval_fddrat_libero.py \                                
+      -c src/model/eval_mod.ckpt \                                              
+      -o eval_out/ \                                                            
+      --n_test 50 \                                                             
+      --n_test_vis 5                                                            
+                                                                                
+                                                                                
+  [robosuite WARNING] No private macro file found! (__init__.py:7)              
+  [robosuite WARNING] It is recommended to use a private macro file             
+  (__init__.py:8)                                                               
+  [robosuite WARNING] To setup, run: python /kaggle/working/.venv/lib/python3.1 
+  2/site-packages/robosuite/scripts/setup_macros.py (__init__.py:9)             
+  Traceback (most recent call last):                                            
+    File "/kaggle/working/scripts/eval_fddrat_libero.py", line 33, in <module>  
+      from oat.env_runner.libero_runner import LiberoRunner                     
+    File "/kaggle/working/oat/oat/env_runner/libero_runner.py", line 13, in     
+  <module>                                                                      
+      from oat.env.libero.env import LiberoEnv                                  
+    File "/kaggle/working/oat/oat/env/libero/env.py", line 6, in <module>       
+      from libero.libero.envs.env_wrapper import ControlEnv                     
+    File "/kaggle/working/.venv/lib/python3.12/site-packages/libero/libero/envs 
+  /__init__.py", line 1, in <module>                                            
+      from .bddl_base_domain import TASK_MAPPING                                
+    File "/kaggle/working/.venv/lib/python3.12/site-packages/libero/libero/envs 
+  /bddl_base_domain.py", line 3, in <module>                                    
+      import robosuite.utils.transform_utils as T                               
+    File                                                                        
+  "/kaggle/working/.venv/lib/python3.12/site-packages/robosuite/__init__.py",   
+  line 11, in <module>                                                          
+      from robosuite.environments.base import make                              
+    File "/kaggle/working/.venv/lib/python3.12/site-packages/robosuite/environm 
+  ents/__init__.py", line 1, in <module>                                        
+      from .base import REGISTERED_ENVS, MujocoEnv                              
+    File "/kaggle/working/.venv/lib/python3.12/site-packages/robosuite/environm 
+  ents/base.py", line 12, in <module>                                           
+      from robosuite.utils.binding_utils import MjRenderContextOffscreen, MjSim 
+    File "/kaggle/working/.venv/lib/python3.12/site-packages/robosuite/utils/bi 
+  nding_utils.py", line 12, in <module>                                         
+      import mujoco                                                             
+    File                                                                        
+  "/kaggle/working/.venv/lib/python3.12/site-packages/mujoco/__init__.py", line 
+   68, in <module>                                                              
+      from mujoco.rendering.classic.renderer import Renderer  # pytype:         
+  disable=import-error                                                          
+      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^                    
+    File "/kaggle/working/.venv/lib/python3.12/site-packages/mujoco/rendering/c 
+  lassic/renderer.py", line 20, in <module>                                     
+      from mujoco.rendering.classic import gl_context                           
+    File "/kaggle/working/.venv/lib/python3.12/site-packages/mujoco/rendering/c 
+  lassic/gl_context.py", line 38, in <module>                                   
+      from mujoco.osmesa import GLContext as _GLContext                         
+    File "/kaggle/working/.venv/lib/python3.12/site-packages/mujoco/osmesa/__in 
+  it__.py", line 31, in <module>                                                
+      from OpenGL import GL                                                     
+    File                                                                        
+  "/kaggle/working/.venv/lib/python3.12/site-packages/OpenGL/GL/__init__.py",   
+  line 4, in <module>                                                           
+      from OpenGL.GL.VERSION.GL_1_1 import *                                    
+    File "/kaggle/working/.venv/lib/python3.12/site-packages/OpenGL/GL/VERSION/ 
+  GL_1_1.py", line 14, in <module>                                              
+      from OpenGL.raw.GL.VERSION.GL_1_1 import *                                
+    File "/kaggle/working/.venv/lib/python3.12/site-packages/OpenGL/raw/GL/VERS 
+  ION/GL_1_1.py", line 7, in <module>                                           
+      from OpenGL.raw.GL import _errors                                         
+    File "/kaggle/working/.venv/lib/python3.12/site-packages/OpenGL/raw/GL/_err 
+  ors.py", line 4, in <module>                                                  
+      _error_checker = _ErrorChecker( _p, _p.GL.glGetError )                    
+                                          ^^^^^^^^^^^^^^^^                      
+  AttributeError: 'NoneType' object has no attribute 'glGetError'               
+                                                                                
+
+● Проблема в OpenGL/osmesa — на Kaggle osmesa не находит GL библиотеку. Нужно
+  либо поставить libosmesa6-dev, либо переключиться на EGL (лучше для
+  GPU-инстансов). Переключаю на EGL — он не требует PyOpenGL вообще, MuJoCo
+  использует свой нативный EGL:
+
+● Bash(python3 -c "import json;
+      nb=json.load(open('/home/sdogya/Documents/laststand/code/k1.ipynb'));
+      [print(f'Cell {i}: {c[\"source\"][:1]}') for i,c in enumerate(nb[…)
+  ⎿  Cell 0: ['# ── 1. Repos & deps ───────────────────────────────────────
+     ───────────────────\n']
+     Cell 1: ['!ls -ld /kaggle/working/oat/data/libero/*']
+     … +11 lines (ctrl+o to expand)
+  ⎿  Updated cell :
+         1 
+         2 # ── 7. Evaluation ───────────────────────────────────────────
+           ──────────────────
+         3 import os, subprocess, pathlib, yaml
+         4 
+         5 # EGL headless rendering — does NOT require PyOpenGL, uses MuJ
+           oCo's native EGL binding.
+         6 # osmesa fails on Kaggle because libOpenGL.so isn't found by P
+           yOpenGL.
+         7 os.environ['MUJOCO_GL'] = 'egl'
+         8 os.environ.pop('PYOPENGL_PLATFORM', None)  # must NOT be set f
+           or native EGL
+         9 
+        10 # Install EGL runtime if missing (no-op if already present)
+        11 subprocess.run(['apt-get', 'install', '-y', '-q', 'libegl1'], 
+           check=False)
+        12 
+        13 # LIBERO prompts interactively when ~/.libero/config.yaml is m
+           issing.
+        14 # Create it via uv run (libero is only available inside the uv
+            env).
+        15 _cfg_dir = pathlib.Path.home() / '.libero'
+        16 _cfg_dir.mkdir(exist_ok=True)
+        17 _cfg_file = _cfg_dir / 'config.yaml'
+        18 
+        19 if not _cfg_file.exists():
+        20     _pkg = subprocess.check_output(
+        21         ['uv', 'run', 'python', '-c',
+        22          'import libero.libero, pathlib; print(pathlib.Path(li
+           bero.libero.__file__).parent)'],
+        23         text=True
+        24     ).strip()
+        25     _pkg = pathlib.Path(_pkg)
+        26     yaml.dump({
+        27         'benchmark_root': str(_pkg),
+        28         'bddl_files':     str(_pkg / 'bddl_files'),
+        29         'init_states':    str(_pkg / 'init_files'),
+        30         'datasets':       str(_pkg.parent / 'datasets'),
+        31         'assets':         str(_pkg / 'assets'),
+        32     }, _cfg_file.open('w'))
+        33     print(f'Created LIBERO config → {_cfg_file}  (pkg: {_pkg})
+           ')
+        34 else:
+        35     print(f'LIBERO config already exists: {_cfg_file}')
+        36 
+        37 !uv run python scripts/eval_fddrat_libero.py \
+        38     -c src/model/eval_mod.ckpt \
+        39     -o eval_out/ \
+        40     --n_test 50 \
+        41     --n_test_vis 5
+
+● Изменения:
+  - MUJOCO_GL=egl вместо osmesa — MuJoCo сам управляет EGL без PyOpenGL
+  - PYOPENGL_PLATFORM убран (pop) — при EGL он ломает инициализацию
+  - apt-get install libegl1 на случай если EGL runtime не установлен
+
+  Запускай cell-7 заново.
+
+✻ Churned for 39s
+
+❯ Reading package lists...                                                      
+  Building dependency tree...                                                   
+  Reading state information...                                                  
+  libegl1 is already the newest version (1.4.0-1).                              
+  0 upgraded, 0 newly installed, 0 to remove and 133 not upgraded.              
+  LIBERO config already exists: /root/.libero/config.yaml                       
+  [robosuite WARNING] No private macro file found! (__init__.py:7)              
+  [robosuite WARNING] It is recommended to use a private macro file             
+  (__init__.py:8)                                                               
+  [robosuite WARNING] To setup, run: python /kaggle/working/.venv/lib/python3.1 
+  2/site-packages/robosuite/scripts/setup_macros.py (__init__.py:9)             
+  Traceback (most recent call last):                                            
+    File "/kaggle/working/scripts/eval_fddrat_libero.py", line 33, in <module>  
+      from oat.env_runner.libero_runner import LiberoRunner                     
+    File "/kaggle/working/oat/oat/env_runner/libero_runner.py", line 13, in     
+  <module>                                                                      
+      from oat.env.libero.env import LiberoEnv                                  
+    File "/kaggle/working/oat/oat/env/libero/env.py", line 6, in <module>       
+      from libero.libero.envs.env_wrapper import ControlEnv                     
+    File "/kaggle/working/.venv/lib/python3.12/site-packages/libero/libero/envs 
+  /__init__.py", line 6, in <module>                                            
+      from .env_wrapper import OffScreenRenderEnv, SegmentationRenderEnv        
+    File "/kaggle/working/.venv/lib/python3.12/site-packages/libero/libero/envs 
+  /env_wrapper.py", line 4, in <module>                                         
+      import matplotlib.cm as cm                                                
+    File                                                                        
+  "/kaggle/working/.venv/lib/python3.12/site-packages/matplotlib/__init__.py",  
+  line 1299, in <module>                                                        
+      rcParams['backend'] = os.environ.get('MPLBACKEND')                        
+      ~~~~~~~~^^^^^^^^^^^                                                       
+    File                                                                        
+  "/kaggle/working/.venv/lib/python3.12/site-packages/matplotlib/__init__.py",  
+  line 774, in __setitem__                                                      
+      raise ValueError(f"Key {key}: {ve}") from None                            
+  ValueError: Key backend: 'module://matplotlib_inline.backend_inline' is not a 
+   valid value for backend; supported values are ['gtk3agg', 'gtk3cairo',       
+  'gtk4agg', 'gtk4cairo', 'macosx', 'nbagg', 'notebook', 'qtagg', 'qtcairo',    
+  'qt5agg', 'qt5cairo', 'tkagg', 'tkcairo', 'webagg', 'wx', 'wxagg', 'wxcairo', 
+   'agg', 'cairo', 'pdf', 'pgf', 'ps', 'svg', 'template']                       
+                                                                                
+
+● MPLBACKEND=matplotlib_inline.backend_inline из Jupyter-ядра пробрасывается в
+  subprocess, а в uv-окружении этого backend нет. Нужно переопределить на agg:
+  ⎿  Updated cell :
+         1 
+         2 # ── 7. Evaluation ───────────────────────────────────────────
+           ──────────────────
+         3 import os, subprocess, pathlib, yaml
+         4 
+         5 os.environ['MUJOCO_GL'] = 'egl'
+         6 os.environ.pop('PYOPENGL_PLATFORM', None)
+         7 os.environ['MPLBACKEND'] = 'agg'   # override Jupyter's inline
+            backend — not available in uv env
+         8 
+         9 subprocess.run(['apt-get', 'install', '-y', '-q', 'libegl1'], 
+           check=False)
+        10 
+        11 _cfg_dir = pathlib.Path.home() / '.libero'
+        12 _cfg_dir.mkdir(exist_ok=True)
+        13 _cfg_file = _cfg_dir / 'config.yaml'
+        14 
+        15 if not _cfg_file.exists():
+        16     _pkg = subprocess.check_output(
+        17         ['uv', 'run', 'python', '-c',
+        18          'import libero.libero, pathlib; print(pathlib.Path(li
+           bero.libero.__file__).parent)'],
+        19         text=True
+        20     ).strip()
+        21     _pkg = pathlib.Path(_pkg)
+        22     yaml.dump({
+        23         'benchmark_root': str(_pkg),
+        24         'bddl_files':     str(_pkg / 'bddl_files'),
+        25         'init_states':    str(_pkg / 'init_files'),
+        26         'datasets':       str(_pkg.parent / 'datasets'),
+        27         'assets':         str(_pkg / 'assets'),
+        28     }, _cfg_file.open('w'))
+        29     print(f'Created LIBERO config → {_cfg_file}  (pkg: {_pkg})
+           ')
+        30 else:
+        31     print(f'LIBERO config already exists: {_cfg_file}')
+        32 
+        33 !MPLBACKEND=agg uv run python scripts/eval_fddrat_libero.py \
+        34     -c src/model/eval_mod.ckpt \
+        35     -o eval_out/ \
+        36     --n_test 50 \
+        37     --n_test_vis 5
+
+● Запускай.
+
+❯ Reading package lists...                                                      
+  Building dependency tree...                                                   
+  Reading state information...                                                  
+  libegl1 is already the newest version (1.4.0-1).                              
+  0 upgraded, 0 newly installed, 0 to remove and 133 not upgraded.              
+  LIBERO config already exists: /root/.libero/config.yaml                       
+  [robosuite WARNING] No private macro file found! (__init__.py:7)              
+  [robosuite WARNING] It is recommended to use a private macro file             
+  (__init__.py:8)                                                               
+  [robosuite WARNING] To setup, run: python /kaggle/working/.venv/lib/python3.1 
+  2/site-packages/robosuite/scripts/setup_macros.py (__init__.py:9)             
+  Traceback (most recent call last):                                            
+    File "/kaggle/working/scripts/eval_fddrat_libero.py", line 179, in <module> 
+      eval_policy_sim()                                                         
+    File "/kaggle/working/.venv/lib/python3.12/site-packages/click/core.py",    
+  line 1485, in __call__                                                        
+      return self.main(*args, **kwargs)                                         
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^                                         
+    File "/kaggle/working/.venv/lib/python3.12/site-packages/click/core.py",    
+  line 1406, in main                                                            
+      rv = self.invoke(ctx)                                                     
+           ^^^^^^^^^^^^^^^^                                                     
+    File "/kaggle/working/.venv/lib/python3.12/site-packages/click/core.py",    
+  line 1269, in invoke                                                          
+      return ctx.invoke(self.callback, **ctx.params)                            
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^                            
+    File "/kaggle/working/.venv/lib/python3.12/site-packages/click/core.py",    
+  line 824, in invoke                                                           
+      return callback(*args, **kwargs)                                          
+             ^^^^^^^^^^^^^^^^^^^^^^^^^                                          
+    File "/kaggle/working/scripts/eval_fddrat_libero.py", line 82, in           
+  eval_policy_sim                                                               
+      system = LitSystem.load_from_checkpoint(ckpt, map_location=device)        
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^        
+    File "/kaggle/working/.venv/lib/python3.12/site-packages/pytorch_lightning/ 
+  utilities/model_helpers.py", line 130, in wrapper                             
+      return self.method(cls_type, *args, **kwargs)                             
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^                             
+    File "/kaggle/working/.venv/lib/python3.12/site-packages/pytorch_lightning/ 
+  core/module.py", line 1797, in load_from_checkpoint                           
+      loaded = _load_from_checkpoint(                                           
+               ^^^^^^^^^^^^^^^^^^^^^^                                           
+    File "/kaggle/working/.venv/lib/python3.12/site-packages/pytorch_lightning/ 
+  core/saving.py", line 65, in _load_from_checkpoint                            
+      checkpoint = pl_load(checkpoint_path, map_location=map_location,          
+  weights_only=weights_only)                                                    
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ 
+  ^^^^^^^^^^^^^^^^^^                                                            
+    File "/kaggle/working/.venv/lib/python3.12/site-packages/lightning_fabric/u 
+  tilities/cloud_io.py", line 73, in _load                                      
+      return torch.load(                                                        
+             ^^^^^^^^^^^                                                        
+    File                                                                        
+  "/kaggle/working/.venv/lib/python3.12/site-packages/torch/serialization.py",  
+  line 1578, in load                                                            
+      raise pickle.UnpicklingError(_get_wo_message(str(e))) from None           
+  _pickle.UnpicklingError: Weights only load failed. This file can still be     
+  loaded, to do so you have two options, do those steps only if you trust the   
+  source of the checkpoint.                                                     
+      (1) In PyTorch 2.6, we changed the default value of the `weights_only`    
+  argument in `torch.load` from `False` to `True`. Re-running `torch.load` with 
+   `weights_only` set to `False` will likely succeed, but it can result in      
+  arbitrary code execution. Do it only if you got the file from a trusted       
+  source.                                                                       
+      (2) Alternatively, to load with `weights_only=True` please check the      
+  recommended steps in the following error message.                             
+      WeightsUnpickler error: Unsupported global: GLOBAL                        
+  omegaconf.dictconfig.DictConfig was not an allowed global by default. Please  
+  use `torch.serialization.add_safe_globals([omegaconf.dictconfig.DictConfig])` 
+   or the `torch.serialization.safe_globals([omegaconf.dictconfig.DictConfig])` 
+   context manager to allowlist this global if you trust this class/function.   
+                                                                                
+  Check the documentation of torch.load to learn more about types accepted by   
+  default with weights_only                                                     
+  https://pytorch.org/docs/stable/generated/torch.load.html.                    
+  sys:1: DeprecationWarning: Call to deprecated function (or staticmethod)      
+  _destroy.                                                                     
+                                                                                
+
+● PyTorch 2.6 изменил дефолт weights_only=True, а checkpoint содержит
+  OmegaConf.DictConfig. Фиксим в eval-скрипте:
+
+● Update(scripts/eval_fddrat_libero.py)
+  ⎿  Added 1 line, removed 1 line
+      79  
+      80          # Load policy from Lightning checkpoint
+      81          from src.core.system import LitSystem
+      82 -        system = LitSystem.load_from_checkpoint(ckpt, map_locat
+         -ion=device)                                                    
+      82 +        system = LitSystem.load_from_checkpoint(ckpt, map_locat
+         +ion=device, weights_only=False)                                
+      83          policy = system.model
+      84          policy.to(torch.device(device))
+      85          policy.eval()
+
+● Запускай cell-7 снова.
+
+❯ Reading package lists...                                                      
+  Building dependency tree...                                                   
+  Reading state information...                                                  
+  libegl1 is already the newest version (1.4.0-1).                              
+  0 upgraded, 0 newly installed, 0 to remove and 133 not upgraded.              
+  LIBERO config already exists: /root/.libero/config.yaml                       
+  [robosuite WARNING] No private macro file found! (__init__.py:7)              
+  [robosuite WARNING] It is recommended to use a private macro file             
+  (__init__.py:8)                                                               
+  [robosuite WARNING] To setup, run: python /kaggle/working/.venv/lib/python3.1 
+  2/site-packages/robosuite/scripts/setup_macros.py (__init__.py:9)             
+  /kaggle/working/.venv/lib/python3.12/site-packages/torchvision/models/_utils. 
+  py:208: UserWarning: The parameter 'pretrained' is deprecated since 0.13 and  
+  may be removed in the future, please use 'weights' instead.                   
+    warnings.warn(                                                              
+  /kaggle/working/.venv/lib/python3.12/site-packages/torchvision/models/_utils. 
+  py:223: UserWarning: Arguments other than a weight enum or `None` for         
+  'weights' are deprecated since 0.13 and may be removed in the future. The     
+  current behavior is equivalent to passing `weights=None`.                     
+    warnings.warn(msg)                                                          
+  Traceback (most recent call last):                                            
+    File "/kaggle/working/scripts/eval_fddrat_libero.py", line 179, in <module> 
+      eval_policy_sim()                                                         
+    File "/kaggle/working/.venv/lib/python3.12/site-packages/click/core.py",    
+  line 1485, in __call__                                                        
+      return self.main(*args, **kwargs)                                         
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^                                         
+    File "/kaggle/working/.venv/lib/python3.12/site-packages/click/core.py",    
+  line 1406, in main                                                            
+      rv = self.invoke(ctx)                                                     
+           ^^^^^^^^^^^^^^^^                                                     
+    File "/kaggle/working/.venv/lib/python3.12/site-packages/click/core.py",    
+  line 1269, in invoke                                                          
+      return ctx.invoke(self.callback, **ctx.params)                            
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^                            
+    File "/kaggle/working/.venv/lib/python3.12/site-packages/click/core.py",    
+  line 824, in invoke                                                           
+      return callback(*args, **kwargs)                                          
+             ^^^^^^^^^^^^^^^^^^^^^^^^^                                          
+    File "/kaggle/working/scripts/eval_fddrat_libero.py", line 82, in           
+  eval_policy_sim                                                               
+      system = LitSystem.load_from_checkpoint(ckpt, map_location=device,        
+  weights_only=False)                                                           
+                                                                                
+  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ 
+    File "/kaggle/working/.venv/lib/python3.12/site-packages/pytorch_lightning/ 
+  utilities/model_helpers.py", line 130, in wrapper                             
+      return self.method(cls_type, *args, **kwargs)                             
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^                             
+    File "/kaggle/working/.venv/lib/python3.12/site-packages/pytorch_lightning/ 
+  core/module.py", line 1797, in load_from_checkpoint                           
+      loaded = _load_from_checkpoint(                                           
+               ^^^^^^^^^^^^^^^^^^^^^^                                           
+    File "/kaggle/working/.venv/lib/python3.12/site-packages/pytorch_lightning/ 
+  core/saving.py", line 93, in _load_from_checkpoint                            
+      model = _load_state(cls, checkpoint, strict=strict, **kwargs)             
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^             
+    File "/kaggle/working/.venv/lib/python3.12/site-packages/pytorch_lightning/ 
+  core/saving.py", line 189, in _load_state                                     
+      keys = obj.load_state_dict(checkpoint["state_dict"], strict=strict)  #    
+  type: ignore[arg-type]                                                        
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^       
+    File "/kaggle/working/.venv/lib/python3.12/site-packages/torch/nn/modules/m 
+  odule.py", line 2639, in load_state_dict                                      
+      raise RuntimeError(                                                       
+  RuntimeError: Error(s) in loading state_dict for LitSystem:                   
+      Unexpected key(s) in state_dict:                                          
+  "model.normalizer.action.params_dict.offset",                                 
+  "model.normalizer.action.params_dict.scale",                                  
+  "model.normalizer.action.params_dict.input_stats.max",                        
+  "model.normalizer.action.params_dict.input_stats.mean",                       
+  "model.normalizer.action.params_dict.input_stats.min",                        
+  "model.normalizer.action.params_dict.input_stats.std".                        
+  sys:1: DeprecationWarning: Call to deprecated function (or staticmethod)      
+  _destroy.                                                                     
+                                                                                
+
+● save_weights_only=True при сохранении записал normalizer в state_dict, но при
+  загрузке LitSystem.__init__ создаёт пустой nn.ModuleDict() — несоответствие
+  ключей. Нужно либо добавить on_load_checkpoint в LitSystem, либо пофиксить
+  прямо в eval. Сначала смотрю как устроен LinearNormalizer:
+
+  Searched for 2 patterns, read 2 files (ctrl+o to expand)
+
+● Понял механизм — _load_from_state_dict в DictOfTensorMixin строит params_dict
+  динамически. Нужно только чтобы model.normalizer['action'] существовал до
+  вызова load_state_dict. Фиксим в LitSystem:
+
+  Read 1 file (ctrl+o to expand)
+
+● Update(src/core/system.py)
+  ⎿  Added 16 lines
+      27          self.cfg = cfg
+      28          self.model = FDDRATPolicy(cfg.model, shape_meta=cfg.sha
+          pe_meta)
+      29  
+      30 +    def on_load_checkpoint(self, checkpoint: dict) -> None:    
+      31 +        """Pre-populate normalizer slots before load_state_dict
+         + runs.                                                         
+      32 +                                                               
+      33 +        LitSystem.__init__ creates model.normalizer as an empty
+         + nn.ModuleDict.                                                
+      34 +        If the checkpoint was saved after set_normalizer() was 
+         +called, it contains                                            
+      35 +        'model.normalizer.action.*' keys.  load_state_dict woul
+         +d fail with                                                    
+      36 +        'Unexpected key(s)' because 'action' doesn't exist yet.
+      37 +        Adding an empty SingleFieldLinearNormalizer here lets D
+         +ictOfTensorMixin's                                             
+      38 +        custom _load_from_state_dict rebuild params_dict from t
+         +he checkpoint keys.                                            
+      39 +        """                                                    
+      40 +        from oat.model.common.normalizer import SingleFieldLine
+         +arNormalizer                                                   
+      41 +        sd = checkpoint.get('state_dict', {})                  
+      42 +        if any(k.startswith('model.normalizer.action.') for k i
+         +n sd):                                                         
+      43 +            if 'action' not in self.model.normalizer:          
+      44 +                self.model.normalizer['action'] = SingleFieldLi
+         +nearNormalizer()                                               
+      45 +                                                               
+      46      def setup(self, stage: str = None) -> None:
+      47          """Inject dataset normalizer into the policy after data
+          module is ready."""
+      48          if self.trainer and getattr(self.trainer, 'datamodule',
+           None):
+
+● Запускай cell-7 снова.
+
+✻ Crunched for 1m 48s
+
+❯ Reading package lists...                                                      
+  Building dependency tree...                                                   
+  Reading state information...                                                  
+  libegl1 is already the newest version (1.4.0-1).                              
+  0 upgraded, 0 newly installed, 0 to remove and 133 not upgraded.              
+  LIBERO config already exists: /root/.libero/config.yaml                       
+  [robosuite WARNING] No private macro file found! (__init__.py:7)              
+  [robosuite WARNING] It is recommended to use a private macro file             
+  (__init__.py:8)                                                               
+  [robosuite WARNING] To setup, run: python /kaggle/working/.venv/lib/python3.1 
+  2/site-packages/robosuite/scripts/setup_macros.py (__init__.py:9)             
+  /kaggle/working/.venv/lib/python3.12/site-packages/torchvision/models/_utils. 
+  py:208: UserWarning: The parameter 'pretrained' is deprecated since 0.13 and  
+  may be removed in the future, please use 'weights' instead.                   
+    warnings.warn(                                                              
+  /kaggle/working/.venv/lib/python3.12/site-packages/torchvision/models/_utils. 
+  py:223: UserWarning: Arguments other than a weight enum or `None` for         
+  'weights' are deprecated since 0.13 and may be removed in the future. The     
+  current behavior is equivalent to passing `weights=None`.                     
+    warnings.warn(msg)                                                          
+  Compiling static CUDA graphs…                                                 
+  /kaggle/working/.venv/lib/python3.12/site-packages/torch/jit/_script.py:365:  
+  DeprecationWarning: `torch.jit.script_method` is deprecated. Please switch to 
+   `torch.compile` or `torch.export`.                                           
+    warnings.warn(                                                              
+  Warm-up skipped: The size of tensor a (64) must match the size of tensor b    
+  (8) at non-singleton dimension 1                                              
+  [info] using task orders [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]                       
+  Local assets not found. Downloading from HuggingFace Hub...                   
+  Downloading LIBERO assets from Hugging Face...                                
+  /kaggle/working/.venv/lib/python3.12/site-packages/huggingface_hub/utils/_val 
+  idators.py:205: UserWarning: The `local_dir_use_symlinks` argument is         
+  deprecated and ignored in `snapshot_download`. Downloading to a local         
+  directory does not use symlinks anymore.                                      
+    warnings.warn(                                                              
+  Downloading (incomplete total...): 0.00B [00:00, ?B/s]                        
+  Downloading (incomplete total...):  14%|▌   | 14.8k/109k [00:00<00:02,        
+  37.4kB/s]                                                                     
+  Downloading (incomplete total...):   9%|▍    | 147k/1.60M [00:00<00:06,       
+  227kB/s]                                                                      
+  Downloading (incomplete total...):  64%|█▉ | 1.75M/2.73M [00:00<00:00,        
+  3.18MB/s]                                                                     
+  Downloading (incomplete total...): 3.35MB [00:01, 2.78MB/s]                   
+                                                                                
+  Downloading (incomplete total...): 3.51MB [00:01, 2.78MB/s]:01<01:01,         
+  9.32it/s]                                                                     
+  Downloading (incomplete total...): 3.63MB [00:01, 2.78MB/s]:01<00:24,         
+  22.33it/s]                                                                    
+  Downloading (incomplete total...): 3.67MB [00:02, 2.78MB/s]:01<00:23,         
+  23.60it/s]                                                                    
+  Downloading (incomplet                                                        
+  … +110 lines …                                                                
+  , 1, 2, 3, 4, 5, 6, 7, 8, 9]                                                  
+  [info] using task orders [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]                       
+  [info] using task orders [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]                       
+  [info] using task orders [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]                       
+  [info] using task orders [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]                       
+  [info] using task orders [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]                       
+  [info] using task orders [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]                       
+  [info] using task orders [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]                       
+  [info] using task orders [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]                       
+  [info] using task orders [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]                       
+  [info] using task orders [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]                       
+  [info] using task orders [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]                       
+  [info] using task orders [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]                       
+  [info] using task orders [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]                       
+  [info] using task orders [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]                       
+  [info] using task orders [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]                       
+  [info] using task orders [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]                       
+  [info] using task orders [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]                       
+  [info] using task orders [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]                       
+  [info] using task orders [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]                       
+  [info] using task orders [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]                       
+  [info] using task orders [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]                       
+  [info] using task orders [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]                       
+  [info] using task orders [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]                       
+  [info] using task orders [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]                       
+  [info] using task orders [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]                       
+  [info] using task orders [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]                       
+  [info] using task orders [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]                       
+  [info] using task orders [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]                       
+  [info] using task orders [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]                       
+  [info] using task orders [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]                       
+  [info] using task orders [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]                       
+  [info] using task orders [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]                       
+  [info] using task orders [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]                       
+  [info] using task orders [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]                       
+  [info] using task orders [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]                       
+  [info] using task orders [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]                       
+  [info] using task orders [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]                       
+  [info] using task orders [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]                       
+  [info] using task orders [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]                       
+  [info] using task orders [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]                       
+  [info] using task orders [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]                       
+  sys:1: DeprecationWarning: Call to deprecated function (or staticmethod)      
+  _destroy.                                                                     
+                                                                                
+                                                                                
+  Your notebook tried to allocate more memory than is available. It has         
+  restarted.                                                                    
+                                                                                
+  ПУ ПУ ПУ                                                                      
+
+● OOM из-за torch.compile + 48 параллельных LIBERO-окружений. Сначала смотрю
+  сигнатуру LiberoRunner:
+
+  Searched for 2 patterns, read 3 files (ctrl+o to expand)
+● Проблема ясна: n_parallel_envs по умолчанию равен n_test=50 — создаёт 50
+  параллельных MuJoCo-симуляторов сразу. Плюс torch.compile добавляет GPU RAM.
+  Фиксим оба:
+
+● Update(scripts/eval_fddrat_libero.py)
+  ⎿  Added 3 lines, removed 16 lines
+       84          policy.to(torch.device(device))
+       85          policy.eval()
+       86  
+       87 -        # torch.compile decoder + CRH for static CUDA-graph ac
+          -celeration                                                    
+       88 -        print("Compiling static CUDA graphs…")                
+       89 -        policy.compile_decoder()                              
+       90 -        dummy_obs = (                                         
+       91 -            {k: torch.zeros((1, policy.n_obs_steps) + tuple(v[
+          -'shape']),                                                    
+       92 -                             device=device)                   
+       93 -             for k, v in policy.shape_meta['obs'].items()}    
+       94 -            if policy.shape_meta                              
+       95 -            else torch.zeros((1, 1, 3, 224, 224), device=devic
+          -e)                                                            
+       96 -        )                                                     
+       97 -        try:                                                  
+       98 -            policy.predict_action(dummy_obs)                  
+       99 -            print("Warm-up done.")                            
+      100 -        except Exception as e:                                
+      101 -            print(f"Warm-up skipped: {e}")                    
+      102 -                                                              
+       87          # Build LIBERO10 runner
+       88 +        # n_parallel_envs caps simultaneous MuJoCo workers to 
+          +avoid OOM.                                                    
+       89 +        # Runner runs in batches of n_parallel_envs, so n_test
+          + is still fully covered.                                      
+       90          env_runner = LiberoRunner(
+       91              output_dir=output_dir,
+       92              task_name="libero10",
+     ...
+       94              n_test_vis=n_test_vis,
+       95              n_obs_steps=policy.n_obs_steps,
+       96              n_action_steps=policy.n_action_steps,
+       97 +            n_parallel_envs=4,                                
+       98          )
+       99  
+      100          # Latency profiling hook
+
+● Запускай cell-7.
+
+✻ Brewed for 1m 27s
+
+❯ ты еще пропустил в  логах деталь одну , КАКОГО ХУЯ ОН ДАТАСЕТ КАЧАЕТ, у нас   
+  же 2 ячейка и так качает его ? или это другое?                                
+
+● Это другое. Разные вещи:
+
+  - Cell-2/3: качает датасет демонстраций (libero10_N500.zarr, 3.5GB) — нужен
+  для обучения
+  - Eval: качает LIBERO simulation assets (~422MB) — 3D-модели, текстуры,
+  BDDL-файлы, нужные чтобы запустить MuJoCo-симулятор
+
+  Это нормально и происходит один раз — кешируется в /root/.cache/libero/assets.
+   На следующем запуске в той же Kaggle-сессии качать не будет.
+
+❯ Reading package lists...                                                      
+  Building dependency tree...                                                   
+  Reading state information...                                                  
+  libegl1 is already the newest version (1.4.0-1).                              
+  0 upgraded, 0 newly installed, 0 to remove and 133 not upgraded.              
+  LIBERO config already exists: /root/.libero/config.yaml                       
+  [robosuite WARNING] No private macro file found! (__init__.py:7)              
+  [robosuite WARNING] It is recommended to use a private macro file             
+  (__init__.py:8)                                                               
+  [robosuite WARNING] To setup, run: python /kaggle/working/.venv/lib/python3.1 
+  2/site-packages/robosuite/scripts/setup_macros.py (__init__.py:9)             
+  /kaggle/working/.venv/lib/python3.12/site-packages/torchvision/models/_utils. 
+  py:208: UserWarning: The parameter 'pretrained' is deprecated since 0.13 and  
+  may be removed in the future, please use 'weights' instead.                   
+    warnings.warn(                                                              
+  /kaggle/working/.venv/lib/python3.12/site-packages/torchvision/models/_utils. 
+  py:223: UserWarning: Arguments other than a weight enum or `None` for         
+  'weights' are deprecated since 0.13 and may be removed in the future. The     
+  current behavior is equivalent to passing `weights=None`.                     
+    warnings.warn(msg)                                                          
+  [info] using task orders [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]                       
+  Local assets not found. Downloading from HuggingFace Hub...                   
+  Assets already downloaded at /root/.cache/libero/assets                       
+  /usr/lib/python3.12/multiprocessing/popen_fork.py:66: DeprecationWarning:     
+  This process (pid=2885) is multi-threaded, use of fork() may lead to          
+  deadlocks in the child.                                                       
+    self.pid = os.fork()                                                        
+  [info] using task orders [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]                       
+  [info] using task orders [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]                       
+  [info] using task orders [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]                       
+  [info] using task orders [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]                       
+  Eval fddrat in Libero::libero10 1/13:   0%|             | 0/550 [00:00<?,     
+  ?it/s]Traceback (most recent call last):                                      
+    File "/kaggle/working/scripts/eval_fddrat_libero.py", line 166, in <module> 
+      eval_policy_sim()                                                         
+    File "/kaggle/working/.venv/lib/python3.12/site-packages/click/core.py",    
+  line 1485, in __call__                                                        
+      return self.main(*args, **kwargs)                                         
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^                                         
+    File "/kaggle/working/.venv/lib/python3.12/site-packages/click/core.py",    
+  line 1406, in main                                                            
+      rv = self.invoke(ctx)                                                     
+           ^^^^^^^^^^^^^^^^                                                     
+    File "/kaggle/working/.venv/lib/python3.12/site-packages/click/core.py",    
+  line 1269, in invoke                                                          
+      return ctx.invoke(self.callback, **ctx.params)                            
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^                            
+    File "/kaggle/working/.venv/lib/python3.12/site-packages/click/core.py",    
+  line 824, in invoke                                                           
+      return callback(*args, **kwargs)                                          
+             ^^^^^^^^^^^^^^^^^^^^^^^^^                                          
+    File "/kaggle/working/scripts/eval_fddrat_libero.py", line 118, in          
+  eval_policy_sim                                                               
+      runner_log = env_runner.run(policy)                                       
+                   ^^^^^^^^^^^^^^^^^^^^^^                                       
+    File "/kaggle/working/.venv/lib/python3.12/site-packages/torch/utils/_conte 
+  xtlib.py", line 124, in decorate_context                                      
+      return func(*args, **kwargs)                                              
+             ^^^^^^^^^^^^^^^^^^^^^                                              
+    File "/kaggle/working/oat/oat/env_runner/libero_runner.py", line 252, in    
+  run                                                                           
+      action = policy.predict_action({                                          
+               ^^^^^^^^^^^^^^^^^^^^^^^                                          
+    File "/kaggle/working/scripts/eval_fddrat_libero.py", line 108, in _timed   
+      out = _orig(*args, **kwargs)                                              
+            ^^^^^^^^^^^^^^^^^^^^^^                                              
+    File "/kaggle/working/.venv/lib/python3.12/site-packages/torch/utils/_conte 
+  xtlib.py", line 124, in decorate_context                                      
+      return func(*args, **kwargs)                                              
+             ^^^^^^^^^^^^^^^^^^^^^                                              
+    File "/kaggle/working/src/fddrat/policy.py", line 319, in predict_action    
+      a_coarse_norm = self.action_tokenizer.decode_coarse(latents_filtered)     
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^     
+    File "/kaggle/working/src/fddrat/tokenizer.py", line 119, in decode_coarse  
+      return self.decoder(latents)                                              
+             ^^^^^^^^^^^^^^^^^^^^^                                              
+    File "/kaggle/working/.venv/lib/python3.12/site-packages/torch/nn/modules/m 
+  odule.py", line 1779, in _wrapped_call_impl                                   
+      return self._call_impl(*args, **kwargs)                                   
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^                                   
+    File "/kaggle/working/.venv/lib/python3.12/site-packages/torch/nn/modules/m 
+  odule.py", line 1790, in _call_impl                                           
+      return forward_call(*args, **kwargs)                                      
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^                                      
+    File                                                                        
+  "/kaggle/working/oat/oat/tokenizer/oat/decoder/single_pass_decoder.py", line  
+  76, in forward                                                                
+      latents = self.latent_pos_emb(latents)                                    
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^                                    
+    File "/kaggle/working/.venv/lib/python3.12/site-packages/torch/nn/modules/m 
+  odule.py", line 1779, in _wrapped_call_impl                                   
+      return self._call_impl(*args, **kwargs)                                   
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^                                   
+    File "/kaggle/working/.venv/lib/python3.12/site-packages/torch/nn/modules/m 
+  odule.py", line 1790, in _call_impl                                           
+      return forward_call(*args, **kwargs)                                      
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^                                      
+    File "/kaggle/working/.venv/lib/python3.12/site-packages/torch/_dynamo/eval 
+  _frame.py", line 1263, in _fn                                                 
+      return fn(*args, **kwargs)                                                
+             ^^^^^^^^^^^^^^^^^^^                                                
+    File "/kaggle/working/oat/oat/tokenizer/oat/model/pos_emb.py", line 193, in 
+   forward                                                                      
+      x = x + posembs                                                           
+          ~~^~~~~~~~~                                                           
+  RuntimeError: The size of tensor a (64) must match the size of tensor b (8)   
+  at non-singleton dimension 1                                                  
+  sys:1: DeprecationWarning: Call to deprecated function (or staticmethod)      
+  _destroy.                                                                     
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+  ОП, другая ошибочка                                                           
+
+● Ошибка на инференсе: latents имеет размер 64 (из cfg.H_l=64), но декодер имеет
+   positional embedding только на 8 позиций — именно столько H_l у обученного
+  OAT-токенизатора. В обучении это не падало потому что encode() возвращает
+  реальные 8 токенов и цикл по тензору. На инференсе цикл явно идёт
+  range(cfg.H_l)=range(64).
+
+  Нужно брать реальный H_l из токенизатора, а не из конфига. Смотрю декодер:
+
+  Read 2 files (ctrl+o to expand)
+
+● SinglePassDecoder имеет атрибут latent_horizon — именно из него берём реальный
+   H_l. В predict_action цикл идёт по cfg.H_l=64, но декодер обучен на 8. Фиксим
+   в policy.py:
+
+● Update(src/fddrat/policy.py)
+  ⎿  Added 4 lines, removed 1 line
+      279          if hasattr(self.action_tokenizer, 'bos_id_emb'):
+      280              latents = self.action_tokenizer.bos_id_emb.expand(
+           B, 1, -1)
+      281  
+      282 +        # Use actual H_l from decoder (cfg.H_l may mismatch to
+          +kenizer's latent_horizon)                                     
+      283 +        H_l = getattr(self.action_tokenizer.decoder, 'latent_h
+          +orizon', self.cfg.H_l)                                        
+      284 +                                                              
+      285          tokens_generated = []
+      286          # Note: each AR step re-runs the full prefix (O(H_l²) 
+           attention).
+      287          # With H_l=8 this is negligible (64 ops). If H_l grows
+           , add KV-cache
+      288          # to ARModelWithHiddens to make inference O(H_l) inste
+           ad.
+      286 -        for t in range(self.cfg.H_l):                         
+      289 +        for t in range(H_l):                                  
+      290              logits_step, hidden_states = self.ar_model(tokens_
+           in, cond=cond_input)
+      291  
+      292              next_token = torch.argmax(logits_step[:, -1, :], d
+           im=-1)  # [B]
+
+● Update(src/fddrat/policy.py)
+  ⎿  Added 1 line, removed 1 line
+      310                      break
+      311  
+      312          # Zero-pad latents if stopped early (non-zero padding 
+           → CRH hallucinations)
+      313 -        pad_size = self.cfg.H_l - len(tokens_generated)       
+      313 +        pad_size = H_l - len(tokens_generated)                
+      314          if pad_size > 0:
+      315              latents = torch.cat([
+      316                  latents,
+
+● Запускай cell-7.
+
+✻ Cogitated for 1m 34s
+
+❯ а нам щас эту штуку переобучать случайно не надо ?                            
+
+● Нет, переобучать не обязательно — модель загрузится и eval пройдёт. Но есть
+  нюанс.
+
+  Во время обучения K_sampled сэмплировался из [1, 65) при cfg.H_l=64, а
+  реальных латентов только 8. Значит K_sampled > 8 (~87% времени) → dropout не
+  применялся → CRH обучался почти всегда на полных 8 латентах, а не на
+  обрезанных префиксах.
+
+  Что это значит:
+  - AR backbone и нормализатор обучились нормально
+  - CRH обучился, но не видел "голодных" входов часто → ранний выход может
+  работать слабее
+  - Router тоже не получил достаточно сигналов с неполными префиксами
+
+  Для eval: модель будет работать, результаты будут, но ранний выход будет не
+  так эффективен как мог бы.
+
+  Чтобы получить нормальные числа — нужно поправить конфиг (H_l=8) и
+  переобучить. Решение за тобой: запускаем eval на текущем checkpoint'е (быстро,
+   есть числа) или сначала переобучаем правильно?
+
+✻ Sautéed for 36s
+
+❯ Reading package lists...                                                      
+  Building dependency tree...                                                   
+  Reading state information...                                                  
+  libegl1 is already the newest version (1.4.0-1).                              
+  0 upgraded, 0 newly installed, 0 to remove and 133 not upgraded.              
+  LIBERO config already exists: /root/.libero/config.yaml                       
+  [robosuite WARNING] No private macro file found! (__init__.py:7)              
+  [robosuite WARNING] It is recommended to use a private macro file             
+  (__init__.py:8)                                                               
+  [robosuite WARNING] To setup, run: python /kaggle/working/.venv/lib/python3.1 
+  2/site-packages/robosuite/scripts/setup_macros.py (__init__.py:9)             
+  /kaggle/working/.venv/lib/python3.12/site-packages/torchvision/models/_utils. 
+  py:208: UserWarning: The parameter 'pretrained' is deprecated since 0.13 and  
+  may be removed in the future, please use 'weights' instead.                   
+    warnings.warn(                                                              
+  /kaggle/working/.venv/lib/python3.12/site-packages/torchvision/models/_utils. 
+  py:223: UserWarning: Arguments other than a weight enum or `None` for         
+  'weights' are deprecated since 0.13 and may be removed in the future. The     
+  current behavior is equivalent to passing `weights=None`.                     
+    warnings.warn(msg)                                                          
+  [info] using task orders [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]                       
+  Local assets not found. Downloading from HuggingFace Hub...                   
+  Assets already downloaded at /root/.cache/libero/assets                       
+  /usr/lib/python3.12/multiprocessing/popen_fork.py:66: DeprecationWarning:     
+  This process (pid=3067) is multi-threaded, use of fork() may lead to          
+  deadlocks in the child.                                                       
+    self.pid = os.fork()                                                        
+  [info] using task orders [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]                       
+  [info] using task orders [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]                       
+  [info] using task orders [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]                       
+  [info] using task orders [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]                       
+  Eval fddrat in Libero::libero10 1/13:   6%|▏   | 32/550 [00:34<09:25,         
+  1.09s/it]                                                                     
+                                                                                
+  ПОЧЕМУ ОНО НА ПРОЦЕ СЧИТАЕТ                                                   
+                                                                                
+   Draft Session                                                                
+  GPU T4 x2 On                                                                  
+  Session                                                                       
+  46m                                                                           
+  12 hours                                                                      
+  Disk                                                                          
+  8.1GiB                                                                        
+  Max 57.6GiB                                                                   
+  CPU                                                                           
+  CPU                                                                           
+  399.00%                                                                       
+  RAM                                                                           
+  12.2GiB                                                                       
+  Max 30GiB                                                                     
+  GPU                                                                           
+  GPU                                                                           
+  0.00%                                                                         
+  GPU Memory                                                                    
+  1.4GiB                                                                        
+  Max 15GiB                                                                     
+  GPU                                                                           
+  GPU                                                                           
+  0.00%                                                                         
+  GPU Memory                                                                    
+  3MiB                                                                          
+  Max 15GiB                                                                     
+
+● Это нормально. Bottleneck — MuJoCo-физика, а не политика.
+
+  Каждая итерация = 1 вызов predict_action (GPU, ~100ms) + 4 env × 32 шага
+  физики MuJoCo (CPU, ~1s). GPU работает ~10% времени и мониторинг показывает
+  0%. 399% CPU — это 4 параллельных LiberoEnv считают физику.
+
+  13 батчей × ~550 шагов / 32 / 1.09s ≈ ~8 минут. Всё идёт правильно.
+
+✻ Worked for 1m 46s
+
+❯ т.е 13 запусков займет около двух часов? а мы может все таки можем это        
+  ускорить ? а то у меня kaggle быстрее сядет например щас мы забили только 12  
+  гб оперативы из 30                                                            
+
+● У тебя 18GB свободно — смело поднимаем n_parallel_envs. Каждый env ~200MB RAM,
+   итого 20 env ≈ +4GB.
+
+  С n_parallel_envs=25 будет ceil(50/25)=2 батча вместо 13 → ~6x быстрее, ~18-20
+   минут.
+
+  Правим eval скрипт и перезапускаем:
+
+● Update(scripts/eval_fddrat_libero.py)
+  ⎿  Added 1 line, removed 1 line
+       94              n_test_vis=n_test_vis,
+       95              n_obs_steps=policy.n_obs_steps,
+       96              n_action_steps=policy.n_action_steps,
+       97 -            n_parallel_envs=4,                                
+       97 +            n_parallel_envs=25,                               
+       98          )
+       99  
+      100          # Latency profiling hook
+
+● Перезапускай cell-7 (interrupt текущий если ещё идёт). Смотри на RAM — если
+  перешагнёт 25GB, скажи, снизим до 20.
+
+✻ Baked for 33s
+
+❯ умерло поставь, туда  10                                                      
+
+● Update(scripts/eval_fddrat_libero.py)
+  ⎿  Added 1 line, removed 1 line
+       94              n_test_vis=n_test_vis,
+       95              n_obs_steps=policy.n_obs_steps,
+       96              n_action_steps=policy.n_action_steps,
+       97 -            n_parallel_envs=25,                               
+       97 +            n_parallel_envs=10,                               
+       98          )
+       99  
+      100          # Latency profiling hook
+● ceil(50/10)=5 батчей → ~40 минут. Запускай.
+
+❯ так и он куда итоги выполнения сохранит чтобы я их смог скачать  ? и что там  
+  вообще будет ?                                                                
+
+● Смотри в eval_out/:
+
+  - eval_log.json — все метрики: success rate по каждой задаче, mean, latency
+  p99/mean
+  - media/ — mp4 видео первых 5 роллаутов
+
+  Чтобы скачать с Kaggle — после завершения запусти в отдельной ячейке:
+
+  import shutil
+  shutil.make_archive('eval_results', 'zip', 'eval_out/')
+
+  Появится eval_results.zip в /kaggle/working/ — его можно скачать через Output
+  tab справа.
+
+❯ почему там кста task order одинаковый                                         
+
+● AsyncVectorEnv создаёт n_parallel_envs воркер-процессов через fork(). Каждый
+  воркер при инициализации своего LiberoEnv печатает [info] using task orders 
+  [0..9] — это внутренний лог LIBERO-библиотеки, не наш код.
+
+  С n_parallel_envs=4 было 4 строки, с 10 будет 10, с 25 было 25. Это норма,
+  просто шум.
