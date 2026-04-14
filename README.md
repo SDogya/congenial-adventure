@@ -46,8 +46,7 @@
 | Файл | Назначение |
 |------|-----------|
 | [`notebooks/should works.ipynb`](notebooks/should%20works.ipynb) | Рабочий ноутбук, на котором получены результаты из статьи |
-| [`notebooks/k3.ipynb`](notebooks/k3.ipynb) | Чистая версия с `model.H_l=8` (исправлен баг) |
-| [`notebooks/k1.ipynb`](notebooks/k1.ipynb) | Ранняя версия pipeline |
+
 
 ---
 
@@ -62,8 +61,6 @@
 │
 ├── notebooks/                    # Kaggle-ноутбуки
 │   ├── should works.ipynb        # ← рабочий ноутбук с реальными результатами
-│   ├── k3.ipynb                  # чистая версия (рекомендуется для новых запусков)
-│   └── k1.ipynb                  # ранняя версия
 │
 ├── paperdraft/                   # черновик статьи (Typst)
 │   ├── fork.typ                  # основной текст
