@@ -279,11 +279,14 @@ class FDDRATPolicy(BasePolicy):
         if hasattr(self.action_tokenizer, 'bos_id_emb'):
             latents = self.action_tokenizer.bos_id_emb.expand(B, 1, -1)
 
+        # Use actual H_l from decoder (cfg.H_l may mismatch tokenizer's latent_horizon)
+        H_l = getattr(self.action_tokenizer.decoder, 'latent_horizon', self.cfg.H_l)
+
         tokens_generated = []
         # Note: each AR step re-runs the full prefix (O(H_l²) attention).
         # With H_l=8 this is negligible (64 ops). If H_l grows, add KV-cache
         # to ARModelWithHiddens to make inference O(H_l) instead.
-        for t in range(self.cfg.H_l):
+        for t in range(H_l):
             logits_step, hidden_states = self.ar_model(tokens_in, cond=cond_input)
 
             next_token = torch.argmax(logits_step[:, -1, :], dim=-1)  # [B]
@@ -307,7 +310,7 @@ class FDDRATPolicy(BasePolicy):
                     break
 
         # Zero-pad latents if stopped early (non-zero padding → CRH hallucinations)
-        pad_size = self.cfg.H_l - len(tokens_generated)
+        pad_size = H_l - len(tokens_generated)
         if pad_size > 0:
             latents = torch.cat([
                 latents,
