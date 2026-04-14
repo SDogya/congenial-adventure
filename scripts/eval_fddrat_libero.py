@@ -94,7 +94,7 @@ def eval_policy_sim(
             n_test_vis=n_test_vis,
             n_obs_steps=policy.n_obs_steps,
             n_action_steps=policy.n_action_steps,
-            n_parallel_envs=25,
+            n_parallel_envs=10,
         )
 
         # Latency profiling hook
