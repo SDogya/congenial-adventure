@@ -1,8 +1,18 @@
+# Самое интересное 
+
+1) [Обзор инструментов](TASK/1/obzor.pdf)
+
+2) [Логи общения с LLM](code/TASK/2_logs)
+
+3) Про код смотри ниже
+
+4) [отчет](TASK/4_draft/draft.pdf)
+
 # FD-DRAT
 
 **Fixed-Dimension Decoupled Residual Action Tokenization** — политика управления роботом для бенчмарка LIBERO10.
 
-Идея: поверх OAT-токенизатора навешан изолированный роутер (логика H-Net), который на инференсе обрывает авторегрессивную генерацию раньше `H_l` шагов. Чтобы ранний обрыв не портил точность, добавлен Continuous Residual Head (CRH), который доводит грубую траекторию до финальной.
+Идея: поверх OAT-токенизатора добавлен изолированный маршрутизатор, который на инференсе прерывает авторегрессивную генерацию раньше `H_l` шагов. Для компенсации потери точности при раннем выходе предусмотрен Continuous Residual Head (CRH), уточняющий грубую траекторию до финальной.
 
 Три компонента потерь:
 - **L_CE** — кросс-энтропия AR-декодера (основная магистраль)
@@ -16,10 +26,11 @@
 ```
 .
 ├── run.py                      # точка входа (Hydra app)
-├── k1.ipynb                    # ноутбук Kaggle: полный pipeline запуска
+├── k3.ipynb                    # ноутбук Kaggle: полный pipeline (рекомендуемый)
+├── k1.ipynb                    # ноутбук Kaggle: ранняя версия pipeline
 ├── hypotesis.md                # математика и мотивация гипотезы FD-DRAT
 ├── CC_local_repr.md            # инструкция локального воспроизведения
-├── pyproject.toml / requirements.txt
+├── pyproject.toml
 │
 ├── conf/                       # Hydra-конфиги
 │   ├── config.yaml             # корневой конфиг (компонует model + strategy)
@@ -50,7 +61,8 @@
 │   └── eval_fddrat_libero.py   # оценка политики в симуляторе, p99 latency, JSON-лог
 │
 └── src/model/
-    └── model.ckpt              # чекпоинт обученного OAT-токенизатора
+    ├── model.ckpt              # чекпоинт OAT-токенизатора (~100 эпох)
+    └── eval_mod.ckpt           # чекпоинт FD-DRAT политики (~6 эпох)
 ```
 
 ---
@@ -94,7 +106,7 @@ MLP с фиксированным входом `[stop_gradient(a_coarse) || z_v]
 `FDDRATLoss`: CE + λ·BCE(router) + β·masked_MSE(CRH). BCE форсируется в float32 даже при bf16 AMP. MSE маскируется нулём, когда K_sampled == H_l.
 
 ### `scripts/eval_fddrat_libero.py`
-CLI (`click`) для оценки в LIBERO-симуляторе. Принимает `.ckpt` или директорию. Вызывает `policy.compile_decoder()` (torch.compile decoder + CRH), делает warm-up, профилирует p99 latency, сохраняет `eval_log.json` с success rate, latency и видео.
+CLI (`click`) для оценки в LIBERO-симуляторе. Принимает `.ckpt` или директорию. Запускает роллауты через `LiberoRunner` (`n_parallel_envs=10`), профилирует p99 latency, сохраняет `eval_log.json` с per-task success rate, средней задержкой и путями к видео.
 
 ---
 

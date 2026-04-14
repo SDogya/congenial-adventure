@@ -144,11 +144,34 @@ Autoregressive loop up to $H_l$ steps; router checked after step $t > 1$; exit w
 
 *Residual uncertainty.* Replace deterministic CRH with lightweight diffusion over residuals for calibrated uncertainty.
 
-= Conclusion (was made by hands and translated by AI)
+= Conclusion 
 
 FD-DRAT extends OAT with adaptive-length AR decoding via a gradient-isolated Shadow Router and a fixed-dimension CRH. Decoupled Training prevents posterior collapse; fixed-shape decode enables static CUDA graph compilation. 
 
 The prototype reports 6.0% mean SR on LIBERO-10, but this number reflects three compounding under-training conditions: OAT tokenizer trained for only 100 epochs, FD-DRAT cut short at $approx 6$ of 10 epochs by Kaggle session limits, and the $H_l$ mismatch bug throughout. A clean run with a fully-trained tokenizer ($>=300$ epochs), complete FD-DRAT training, and `model.H_l=8` is the required next step.
+
+
+= Human Conclusion
+
+It's hard to draw a definitive conclusion on the validity of the proposed hypothesis. The loss steadily decreased, but the number of training epochs was critically low due to hardware constraints. Additionally, a software bug caught at later stages makes it hard to pinpoint the exact cause of the low Success Rate (SR)—most likely, the result comes from a combination of these factors.
+
+As for AI assistants: fully autonomous project implementation from idea to working code without human intervention is practically impossible right now (though AutoResearchClaw functionality couldn't be tested). For example, the Claude Code agent periodically suggests technically incorrect solutions without proper oversight. Despite my attempts to minimize manual intervention, it remained strictly necessary.
+
+== What was achieved
+
+- Gathered and figured out the papers (OAT, BLT, H-Net) using DeepResearch + NotebookLM + Gemini
+- Successfully generated a hypothesis via NotebookLM + Gemini
+- Implemented a working code prototype after lengthy debugging of tensor dimension conflicts and related errors (even though a hidden bug remained in the final implementation) via Claude Code
+- Got the code to a working state on Kaggle and obtained metrics: 6% SR and 98 ms mean latency
+
+== What didn't work out
+
+- Anticipating all infrastructure vulnerabilities in the "experimental design". For example, deciding to use the OAT library as a third-party dependency instead of making a proper fork led to "dependency hell". Also, the initial lack of cloud model weight saving (W&B) caused significant time loss on kernel restarts.
+- Using Claude Code efficiently. This was due to non-local execution, which left the agent without direct filesystem integration, forcing manual duplication of many actions and draining time and context.
+- Conducting practical testing of the autoresearch and AutoResearchClaw frameworks.
+- Preventing hidden bugs. Despite multiple attempts at static code checking via LLMs and Claude, a hidden dimensionality bug slipped through, undetected by any neural network until the actual training loop started.
+- Ensuring reproducibility. Deploying outside the Kaggle container would require significant effort to resolve environment conflicts (though running Claude Code locally might potentially handle this, but I cannot guarantee it).
+- Running a few experiments, since one full run takes about 5–10 hours.
 
 #bibliography("refs.bib")
 
