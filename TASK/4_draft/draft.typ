@@ -171,7 +171,7 @@ As for AI assistants: fully autonomous project implementation from idea to worki
 - Conducting practical testing of the autoresearch and AutoResearchClaw frameworks.
 - Preventing hidden bugs. Despite multiple attempts at static code checking via LLMs and Claude, a hidden dimensionality bug slipped through, undetected by any neural network until the actual training loop started.
 - Ensuring reproducibility. Deploying outside the Kaggle container would require significant effort to resolve environment conflicts (though running Claude Code locally might potentially handle this, but I cannot guarantee it).
-- Running a few experiments, since one full run takes about 5–10 hours.
+- Executing multiple experimental runs, as a single full training cycle requires 5–10 hours of compute time, which exceeded available resources
 
 #bibliography("refs.bib")
 
@@ -230,4 +230,4 @@ Forward: $bold(h)_0 = "Conv1D"(bold(X))$; for $l=1,...,5$: $bold(h)_l = "GELU"("
 
 RF $= 1 + 2(1+2+4+8+16) = 63 >= H_a = 32$. $L=4$ gives RF=31 (insufficient). No AR states $arrow$ single static CUDA graph.
 
-== Additional author comments  <appendix-aut>
+
