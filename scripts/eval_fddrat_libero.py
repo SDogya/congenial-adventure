@@ -84,23 +84,9 @@ def eval_policy_sim(
         policy.to(torch.device(device))
         policy.eval()
 
-        # torch.compile decoder + CRH for static CUDA-graph acceleration
-        print("Compiling static CUDA graphs…")
-        policy.compile_decoder()
-        dummy_obs = (
-            {k: torch.zeros((1, policy.n_obs_steps) + tuple(v['shape']),
-                             device=device)
-             for k, v in policy.shape_meta['obs'].items()}
-            if policy.shape_meta
-            else torch.zeros((1, 1, 3, 224, 224), device=device)
-        )
-        try:
-            policy.predict_action(dummy_obs)
-            print("Warm-up done.")
-        except Exception as e:
-            print(f"Warm-up skipped: {e}")
-
         # Build LIBERO10 runner
+        # n_parallel_envs caps simultaneous MuJoCo workers to avoid OOM.
+        # Runner runs in batches of n_parallel_envs, so n_test is still fully covered.
         env_runner = LiberoRunner(
             output_dir=output_dir,
             task_name="libero10",
@@ -108,6 +94,7 @@ def eval_policy_sim(
             n_test_vis=n_test_vis,
             n_obs_steps=policy.n_obs_steps,
             n_action_steps=policy.n_action_steps,
+            n_parallel_envs=4,
         )
 
         # Latency profiling hook
