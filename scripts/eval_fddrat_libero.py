@@ -79,7 +79,7 @@ def eval_policy_sim(
 
         # Load policy from Lightning checkpoint
         from src.core.system import LitSystem
-        system = LitSystem.load_from_checkpoint(ckpt, map_location=device)
+        system = LitSystem.load_from_checkpoint(ckpt, map_location=device, weights_only=False)
         policy = system.model
         policy.to(torch.device(device))
         policy.eval()
