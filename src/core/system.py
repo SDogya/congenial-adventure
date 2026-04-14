@@ -27,6 +27,22 @@ class LitSystem(pl.LightningModule):
         self.cfg = cfg
         self.model = FDDRATPolicy(cfg.model, shape_meta=cfg.shape_meta)
 
+    def on_load_checkpoint(self, checkpoint: dict) -> None:
+        """Pre-populate normalizer slots before load_state_dict runs.
+
+        LitSystem.__init__ creates model.normalizer as an empty nn.ModuleDict.
+        If the checkpoint was saved after set_normalizer() was called, it contains
+        'model.normalizer.action.*' keys.  load_state_dict would fail with
+        'Unexpected key(s)' because 'action' doesn't exist yet.
+        Adding an empty SingleFieldLinearNormalizer here lets DictOfTensorMixin's
+        custom _load_from_state_dict rebuild params_dict from the checkpoint keys.
+        """
+        from oat.model.common.normalizer import SingleFieldLinearNormalizer
+        sd = checkpoint.get('state_dict', {})
+        if any(k.startswith('model.normalizer.action.') for k in sd):
+            if 'action' not in self.model.normalizer:
+                self.model.normalizer['action'] = SingleFieldLinearNormalizer()
+
     def setup(self, stage: str = None) -> None:
         """Inject dataset normalizer into the policy after datamodule is ready."""
         if self.trainer and getattr(self.trainer, 'datamodule', None):
